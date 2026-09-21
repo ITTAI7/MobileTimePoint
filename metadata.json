@@ -1,0 +1,6 @@
+{
+  "name": "週末手機時間積分獎勵系統",
+  "description": "對接 Google Sheets 的週末手機時間積分獎勵與點數存摺 PWA，具備小孩檢視區與密碼保護之 ADM 家長操作區。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
