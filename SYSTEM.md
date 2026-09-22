@@ -63,21 +63,54 @@ dist/manifest.webmanifest
 dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
 ```
 
-**部署方式：把 `dist/` 整個目錄當靜態網站託管即可。** 不需要 SSR、不需要 API 代理。
+**部署方式：把 `dist/` 整個目錄當靜態網站託管即可。** 不需要 SSR、不需要 API 代理、不需要後端 runtime。
 
 其他指令：`npm run dev`（port 3000、`--host 0.0.0.0`）、`npm run preview`。
 `npm run clean` 裡提到的 `server.js` 並不存在，是樣板殘留。
 
-### 部署限制（重要）
+### 部署到 Vercel
+
+**這是目前的部署目標。** 匯入 GitHub 倉庫後，Vercel 的 Vite 預設值即可直接使用：
+
+| 設定 | 值 |
+|---|---|
+| Framework Preset | Vite |
+| Build Command | `npm run build` |
+| Output Directory | `dist` |
+| Install Command | `npm install`（預設） |
+| Root Directory | `./`（`package.json` 在倉庫根目錄） |
+| Environment Variables | **不需要任何一個** |
+
+**Node 版本**：Vite 8 要求 `^20.19.0 || >=22.12.0`。專案沒有宣告 `engines`，
+所以會用 Vercel 的預設版本 —— 請確認專案設定裡的 Node.js Version 不低於上述需求。
+
+**倉庫內的 `vercel.json` 只做一件事：設定快取標頭。**
+
+- `/assets/*` → 一年 immutable（檔名帶內容雜湊，安全）
+- `/sw.js`、`/registerSW.js`、`/manifest.webmanifest` → `max-age=0, must-revalidate`
+
+實測 Vercel 的預設值本來就是 `public, max-age=0, must-revalidate`，所以 Service Worker
+**預設已經是安全的**，不會發生「卡在舊版本拿不到更新」的經典 PWA 問題。
+這份設定的實際效益是**讓帶雜湊的 `/assets/*` 能被長期快取**（預設每次都要回源驗證，浪費往返），
+另外把 Service Worker 相關檔案的行為明文寫死，避免哪天平台預設值改變。
+
+**不需要 SPA rewrite。** 本專案沒有前端路由，只有單一頁面（分頁切換是 React state，不改網址），
+所以不要加 catch-all rewrite，以免干擾 Service Worker 對靜態檔案的請求。
+
+### 部署限制（適用於任何平台）
 
 1. **必須掛在網域根目錄。**
    PWA manifest 的 `id` / `start_url` / `scope` 都是 `/`（見 `vite.config.ts`）。
    若要部署到子路徑，必須同時修改 Vite 的 `base` 與 manifest 這三個欄位，否則 Service Worker 與「安裝 App」會失效。
+   （Vercel 預設就是根目錄，不受此限。）
 
 2. **必須是 HTTPS**（`localhost` 除外），否則 Service Worker 不會註冊，PWA 功能全失。
+   （Vercel 自動提供 HTTPS，不受此限。）
 
 3. **瀏覽器要連得到 `script.google.com`。**
-   資料是從使用者的瀏覽器直接打 Apps Script，不經過部署主機。若使用者所在網路封鎖該網域，App 會退回本機快取模式並顯示警示橫幅。
+   資料是從使用者的瀏覽器直接打 Apps Script，**不經過部署主機**。
+   所以 Vercel 這端不需要任何網路設定；但若使用者所在網路（例如公司內網）封鎖該網域，
+   App 會退回本機快取模式並顯示警示橫幅。
 
 4. **不需要任何環境變數。** 見第 6 節。
 
@@ -214,4 +247,5 @@ src/
     PWAInstallButton.tsx
   hooks/                     useOnlineStatus、usePWAInstall
 scripts/generate-icons.js    產生 PWA 圖示的一次性工具
+vercel.json                  Vercel 快取標頭設定（Service Worker 不可長快取）
 ```

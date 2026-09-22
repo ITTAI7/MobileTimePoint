@@ -177,7 +177,7 @@ export default function App() {
 
   // Handle Parent Submitting a Point Adjustment Record
   const handleParentSubmitRecord = async (
-    newRecordData: Omit<CleanRecord, 'id' | 'timestamp' | 'balanceAfter' | 'isLocal'>
+    newRecordData: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
   ): Promise<{ ok: boolean; message?: string }> => {
     // 1. Calculate new points for the targeted child
     const userToUpdate = users.find((u) => u.id === newRecordData.userId);
@@ -185,10 +185,10 @@ export default function App() {
     const newBalance = prevPoints + newRecordData.points;
 
     // 2. Create the clean record with consistent LogID
+    // timestamp 由表單決定（可以補登過去的日期），不是固定用「現在」
     const createdRecord: CleanRecord = {
       ...newRecordData,
       id: `L${Date.now()}`,
-      timestamp: new Date().toISOString(),
       balanceAfter: newBalance,
       isLocal: true,
     };
@@ -392,7 +392,7 @@ export default function App() {
 
         {/* 對帳警示：伺服器用完整歷史比對，發現明細加總與總分對不上時顯示。
             只提示不自動修正 —— 差異的原因不同，正確的修法也不同。 */}
-        {audit && !audit.ok && audit.mismatches.length > 0 && (
+        {audit && !audit.ok && (audit.mismatches.length > 0 || audit.orphans.length > 0) && (
           <div className="mb-4 p-3 rounded-2xl bg-orange-50 border border-orange-300 text-orange-900 text-xs">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-orange-600 shrink-0" />
@@ -411,6 +411,21 @@ export default function App() {
                 </div>
               ))}
             </div>
+            {audit.orphans.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-orange-200 space-y-1">
+                <p className="font-semibold">找不到對應孩子的紀錄</p>
+                {audit.orphans.map((o) => (
+                  <div key={o.userId} className="flex items-center justify-between gap-2 font-mono">
+                    <span>UserID「{o.userId}」</span>
+                    <span className="text-orange-700">共 {o.sum} 點</span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-orange-700/90">
+                  這些分數不屬於任何孩子，通常是 UserID 打錯。
+                </p>
+              </div>
+            )}
+
             <p className="mt-2 text-[11px] text-orange-700/90">
               通常是在試算表手動刪改了紀錄但沒同步總分。請檢查「點數存摺」與「使用者資料與餘額」。
             </p>

@@ -69,9 +69,16 @@ export interface SheetAuditMismatch {
   diff: number;     // stored - sum
 }
 
+/** 存摺裡出現、但使用者表沒有的 UserID（多半是手動輸入打錯） */
+export interface SheetAuditOrphan {
+  userId: string;
+  sum: number;
+}
+
 export interface SheetAudit {
   ok: boolean;
   mismatches: SheetAuditMismatch[];
+  orphans: SheetAuditOrphan[];
   skipped?: string;
 }
 

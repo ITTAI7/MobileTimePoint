@@ -181,9 +181,16 @@ export function parseAudit(raw: unknown): SheetAudit | null {
     };
   });
 
+  const rawOrphans = Array.isArray(a.orphans) ? a.orphans : [];
+  const orphans = rawOrphans.map((item) => {
+    const o = (item || {}) as Record<string, unknown>;
+    return { userId: String(o.userId ?? ''), sum: Number(o.sum) || 0 };
+  });
+
   return {
     ok: a.ok,
     mismatches,
+    orphans,
     skipped: typeof a.skipped === 'string' ? a.skipped : undefined,
   };
 }

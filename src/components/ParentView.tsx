@@ -24,7 +24,7 @@ interface Props {
   selectedUserId: string;
   onSelectUser: (userId: string) => void;
   onSubmitRecord: (
-    record: Omit<CleanRecord, 'id' | 'timestamp' | 'balanceAfter' | 'isLocal'>
+    record: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
   ) => Promise<{ ok: boolean; message?: string }>;
   onAddTask: (task: {
     category: string;
@@ -36,6 +36,37 @@ interface Props {
   onLockParentMode: () => void;
   onChangePasswordClick: () => void;
   isWritingToSheet?: boolean;
+}
+
+/** 本機時區的今天，格式 YYYY-MM-DD（date input 需要） */
+function todayLocalISO(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+/**
+ * 把 date input 的 YYYY-MM-DD 轉成完整時間戳。
+ * 時分秒沿用當下的時鐘 —— 補登時連續登記多筆才會保持先後順序。
+ */
+function toTimestamp(dateStr: string): string {
+  const now = new Date();
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return now.toISOString();
+  return new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds()).toISOString();
+}
+
+/** 這個日期是否落在本週（星期日~星期六）—— 不在的話不會出現在小孩區的本週明細 */
+function isThisWeek(dateStr: string): boolean {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  if (!y || !m || !d) return true;
+  const target = new Date(y, m - 1, d).getTime();
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay());
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return target >= start.getTime() && target < end.getTime();
 }
 
 /** 分類按鈕選中時的配色，與小孩區的類別標籤一致 */
@@ -93,6 +124,7 @@ export const ParentView: React.FC<Props> = ({
   const [saveCustomToTaskList, setSaveCustomToTaskList] = useState(true);
   const [pointsChange, setPointsChange] = useState<number>(parentTasks[0]?.points || 2);
   const [note, setNote] = useState('');
+  const [recordDate, setRecordDate] = useState<string>(todayLocalISO());
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
@@ -184,6 +216,7 @@ export const ParentView: React.FC<Props> = ({
       category,
       points: pointsChange,
       note: note.trim() || undefined,
+      timestamp: toTimestamp(recordDate),
     });
 
     // 伺服器拒絕（例如另一台裝置搶先兌換掉點數）：顯示原因，不要報成功
@@ -502,10 +535,36 @@ export const ParentView: React.FC<Props> = ({
           </div>
         </div>
 
-        {/* Step 4: Optional Note */}
+        {/* Step 4: 登記日期（可補登過去） */}
         <div className="pt-2 border-t border-slate-100">
           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
-            步驟 4：備註說明 (選填)
+            步驟 4：登記日期
+          </label>
+          <input
+            type="date"
+            value={recordDate}
+            max={todayLocalISO()}
+            onChange={(e) => setRecordDate(e.target.value || todayLocalISO())}
+            className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white focus:outline-none"
+          />
+
+          {recordDate !== todayLocalISO() && (
+            <div className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-[11px] text-blue-900">
+              <p className="font-semibold">補登過去的紀錄</p>
+              {!isThisWeek(recordDate) && (
+                <p className="mt-0.5 text-blue-700">
+                  這個日期不在本週，分數照算，但<strong className="font-bold">不會</strong>
+                  出現在小孩區的「本週積分紀錄」裡。
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Step 5: Optional Note */}
+        <div className="pt-2 border-t border-slate-100">
+          <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">
+            步驟 5：備註說明 (選填)
           </label>
           <input
             type="text"
