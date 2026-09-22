@@ -48,6 +48,7 @@ export const KidView: React.FC<Props> = ({
   };
 
   const timeInfo = pointsToTime(currentUser.currentPoints);
+  const theme = themeOf(currentUser);
 
   // 本週區間（星期日 ~ 星期六）
   const week = useMemo(() => getWeekRange(), []);
@@ -110,19 +111,21 @@ export const KidView: React.FC<Props> = ({
         <div className="flex items-center gap-2 p-1.5 bg-slate-200/70 rounded-2xl">
           {availableUsers.map((user) => {
             const isSelected = user.id === currentUser.id;
+            const userTheme = themeOf(user);
             return (
               <button
                 key={user.id}
                 onClick={() => onSelectUser(user.id)}
                 className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl font-medium text-sm transition-all ${
                   isSelected
-                    ? 'bg-white text-blue-700 shadow-sm shadow-slate-200'
+                    ? `bg-white ${userTheme.pillText} shadow-sm shadow-slate-200`
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
                 }`}
               >
+                {/* 頭像一律用各自的顏色，沒選中時也看得出誰是誰 */}
                 <div
-                  className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                    isSelected ? 'bg-blue-600 text-white' : 'bg-slate-300 text-slate-700'
+                  className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white ${
+                    isSelected ? userTheme.avatar : `${userTheme.avatar} opacity-40`
                   }`}
                 >
                   {user.name.charAt(0)}
@@ -142,15 +145,16 @@ export const KidView: React.FC<Props> = ({
         layout
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
-        className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-blue-600 via-indigo-600 to-violet-700 text-white p-6 shadow-xl shadow-blue-500/20"
+        key={currentUser.id}
+        className={`relative overflow-hidden rounded-3xl bg-gradient-to-br ${theme.hero} text-white p-6 shadow-xl ${theme.shadow} transition-colors duration-300`}
       >
         {/* Background decorative elements */}
         <div className="absolute -top-12 -right-12 w-44 h-44 rounded-full bg-white/10 blur-2xl pointer-events-none" />
-        <div className="absolute -bottom-8 -left-8 w-36 h-36 rounded-full bg-indigo-400/20 blur-xl pointer-events-none" />
+        <div className="absolute -bottom-8 -left-8 w-36 h-36 rounded-full bg-white/10 blur-xl pointer-events-none" />
 
         <div className="relative z-10">
           <div className="flex items-center justify-between">
-            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-xs font-medium text-blue-100 border border-white/10">
+            <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/15 backdrop-blur-md text-xs font-medium text-white/80 border border-white/10">
               <Award className="w-3.5 h-3.5 text-amber-300" />
               <span>{currentUser.name} 的手機時間存摺</span>
               {currentUser.grade && <span className="opacity-80">· {currentUser.grade}</span>}
@@ -168,7 +172,7 @@ export const KidView: React.FC<Props> = ({
 
           {/* Large Points Value */}
           <div className="mt-5 text-center">
-            <p className="text-xs uppercase tracking-wider text-blue-200 font-semibold">目前剩餘積分</p>
+            <p className="text-xs uppercase tracking-wider text-white/70 font-semibold">目前剩餘積分</p>
             <div className="mt-1 flex items-baseline justify-center gap-2">
               {/* 負分用暖色示警，不要跟正常分數一樣是白的 */}
               <span
@@ -180,7 +184,7 @@ export const KidView: React.FC<Props> = ({
               </span>
               <span
                 className={`text-lg font-medium ${
-                  currentUser.currentPoints < 0 ? 'text-rose-200' : 'text-blue-200'
+                  currentUser.currentPoints < 0 ? 'text-rose-200' : 'text-white/70'
                 }`}
               >
                 點
@@ -203,7 +207,7 @@ export const KidView: React.FC<Props> = ({
                 <Smartphone className="w-6 h-6" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1 text-xs text-blue-100 font-medium">
+                <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
                   <Clock className="w-3.5 h-3.5 text-amber-300" />
                   <span>週末可用手機時間</span>
                 </div>
@@ -215,7 +219,7 @@ export const KidView: React.FC<Props> = ({
 
             {/* Next 30-min Target Progress */}
             <div className="mt-3.5 pt-3 border-t border-white/15">
-              <div className="flex items-center justify-between text-xs text-blue-100 mb-1.5">
+              <div className="flex items-center justify-between text-xs text-white/80 mb-1.5">
                 <span className="flex items-center gap-1">
                   <Sparkles className="w-3 h-3 text-amber-300" />
                   <span>
@@ -449,6 +453,55 @@ function formatRecordTime(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+/**
+ * 每個孩子一套配色，切換時一眼看得出畫面換了人。
+ * 色票來自 parseCleanUsers 指派的 avatarColor（依使用者表的順序輪流）。
+ * Tailwind 需要完整的類別字串才掃得到，所以不能用字串拼接。
+ */
+interface ChildTheme {
+  hero: string;
+  shadow: string;
+  pillText: string;
+  avatar: string;
+}
+
+const CHILD_THEMES: Record<string, ChildTheme> = {
+  blue: {
+    hero: 'from-blue-600 via-indigo-600 to-violet-700',
+    shadow: 'shadow-blue-500/25',
+    pillText: 'text-blue-700',
+    avatar: 'bg-blue-600',
+  },
+  emerald: {
+    hero: 'from-emerald-500 via-teal-600 to-cyan-700',
+    shadow: 'shadow-emerald-500/25',
+    pillText: 'text-emerald-700',
+    avatar: 'bg-emerald-600',
+  },
+  amber: {
+    hero: 'from-amber-500 via-orange-500 to-rose-500',
+    shadow: 'shadow-amber-500/25',
+    pillText: 'text-amber-700',
+    avatar: 'bg-amber-500',
+  },
+  purple: {
+    hero: 'from-purple-600 via-fuchsia-600 to-pink-600',
+    shadow: 'shadow-purple-500/25',
+    pillText: 'text-purple-700',
+    avatar: 'bg-purple-600',
+  },
+  rose: {
+    hero: 'from-rose-500 via-pink-600 to-fuchsia-700',
+    shadow: 'shadow-rose-500/25',
+    pillText: 'text-rose-700',
+    avatar: 'bg-rose-600',
+  },
+};
+
+function themeOf(user?: { avatarColor?: string }): ChildTheme {
+  return CHILD_THEMES[user?.avatarColor || 'blue'] || CHILD_THEMES.blue;
 }
 
 /** 「兌換30分鐘手機時間」→「30分鐘」；認不出格式就原樣顯示 */

@@ -17,7 +17,6 @@ import {
 import { KidView } from './components/KidView';
 import { ParentView } from './components/ParentView';
 import { ParentPasswordModal } from './components/ParentPasswordModal';
-import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { TasksTableModal } from './components/TasksTableModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
@@ -53,7 +52,6 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<'kid' | 'parent'>('kid');
   const [isParentUnlocked, setIsParentUnlocked] = useState(false);
   const [showPasswordModal, setShowPasswordModal] = useState(false);
-  const [showChangePasswordModal, setShowChangePasswordModal] = useState(false);
 
   const [selectedUserId, setSelectedUserId] = useState<string>('U01');
 
@@ -359,6 +357,17 @@ export default function App() {
             >
               <Settings className="w-4 h-4" />
             </button>
+
+            {/* 上鎖：只在家長模式已解鎖時出現，點一下就退出並回到小孩檢視區 */}
+            {isParentUnlocked && (
+              <button
+                onClick={handleLockParentMode}
+                className="p-2 rounded-xl bg-orange-100 text-orange-700 hover:bg-orange-200 transition active:scale-95"
+                title="上鎖並返回小孩檢視區"
+              >
+                <Lock className="w-4 h-4" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -563,9 +572,6 @@ export default function App() {
             onSelectUser={setSelectedUserId}
             onSubmitRecord={handleParentSubmitRecord}
             onAddTask={handleAddTask}
-            onOpenTasksModal={() => setShowTasksModal(true)}
-            onLockParentMode={handleLockParentMode}
-            onChangePasswordClick={() => setShowChangePasswordModal(true)}
             isWritingToSheet={isWritingToSheet}
           />
         )}
@@ -596,18 +602,6 @@ export default function App() {
           expectedPassword={effectivePassword}
           onSuccess={handlePasswordSuccess}
           onClose={() => setShowPasswordModal(false)}
-        />
-      )}
-
-      {/* Change Password Modal */}
-      {showChangePasswordModal && (
-        <ChangePasswordModal
-          currentPassword={effectivePassword}
-          onSuccess={(newPass) => {
-            setEffectivePassword(newPass);
-            setShowChangePasswordModal(false);
-          }}
-          onClose={() => setShowChangePasswordModal(false)}
         />
       )}
 

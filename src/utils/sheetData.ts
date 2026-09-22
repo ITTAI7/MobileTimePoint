@@ -210,19 +210,34 @@ export function parseAudit(raw: unknown): SheetAudit | null {
 export async function recalculateGoogleSheet(dryRun: boolean): Promise<RecalcResult> {
   const empty = { dryRun, balanceRowsChanged: 0, totals: [], orphans: [] };
 
-  try {
-    const response = await fetch(getStoredApiUrl(), {
-      method: 'POST',
-      body: JSON.stringify({ action: 'recalculate', dryRun }),
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      redirect: 'follow',
-    });
+  // 這裡可以重試，是因為重算冪等（算幾次結果都一樣）。
+  // addLog / addTask 就絕對不行 —— 重送會多出一筆紀錄。
+  const ATTEMPTS = 3;
+  let json: Record<string, unknown> | null = null;
 
-    const text = await response.text();
-    const json = JSON.parse(text);
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(getStoredApiUrl(), {
+        method: 'POST',
+        body: JSON.stringify({ action: 'recalculate', dryRun }),
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        redirect: 'follow',
+      });
+      json = JSON.parse(await response.text());
+      break;
+    } catch {
+      if (attempt === ATTEMPTS) {
+        return { ok: false, ...empty, message: `連線失敗，已重試 ${ATTEMPTS} 次，請稍後再試` };
+      }
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+    }
+  }
+
+  try {
+    if (!json) return { ok: false, ...empty, message: '沒有取得結果' };
 
     if (json.status !== 'success') {
-      return { ok: false, ...empty, message: json.message || '重新計算失敗' };
+      return { ok: false, ...empty, message: String(json.message || '重新計算失敗') };
     }
 
     const totals = (Array.isArray(json.totals) ? json.totals : []).map(
@@ -261,20 +276,40 @@ export async function fetchSheetData(customUrl?: string): Promise<{
   raw: RawSheetResponse;
 }> {
   const url = customUrl || getStoredApiUrl();
-  const res = await fetch(url, {
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-    },
-    // Keep redirect follow for Google Apps Script 302 redirects
-    redirect: 'follow',
-  });
 
-  if (!res.ok) {
-    throw new Error(`連線失敗 (HTTP ${res.status}): 請檢查 API 網址與 Apps Script 權限`);
+  // Apps Script 的 /exec 會 302 轉到 googleusercontent.com，那一跳約有兩成機率回 404。
+  // 這是 Google 端的間歇性問題，不是網址或權限錯誤，所以重試即可 ——
+  // GET 沒有副作用，重試絕對安全。
+  const ATTEMPTS = 4;
+  let data: RawSheetResponse | null = null;
+  let lastStatus = 0;
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        redirect: 'follow',
+      });
+      lastStatus = res.status;
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      // 轉址失敗時會回 HTML，這行會丟出例外，一樣進到重試
+      data = (await res.json()) as RawSheetResponse;
+      break;
+    } catch {
+      if (attempt === ATTEMPTS) {
+        throw new Error(
+          lastStatus
+            ? `連線失敗 (HTTP ${lastStatus})：已重試 ${ATTEMPTS} 次。請檢查網路，或到設定確認 API 網址。`
+            : `連線失敗：已重試 ${ATTEMPTS} 次。請檢查網路連線。`
+        );
+      }
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+    }
   }
 
-  const data: RawSheetResponse = await res.json();
+  if (!data) throw new Error('連線失敗：沒有取得資料');
   const tasks = parseCleanTasks(data['任務與配分表']);
   const users = parseCleanUsers(data['使用者資料與餘額']);
   const records = parseCleanRecords(

@@ -1,17 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import { CleanUser, CleanTask, CleanRecord } from '../types';
-import { 
-  Check, 
-  Plus, 
-  Minus, 
-  ShieldCheck, 
-  Sparkles, 
-  ListPlus, 
-  Lock, 
-  KeyRound,
+import {
+  Check,
+  Plus,
+  Minus,
   CheckCircle,
   ChevronDown,
-  LogOut,
   Loader2,
   AlertTriangle,
   BookmarkPlus
@@ -32,9 +26,6 @@ interface Props {
     points: number;
     note?: string;
   }) => Promise<{ ok: boolean; taskId?: string; message?: string }>;
-  onOpenTasksModal: () => void;
-  onLockParentMode: () => void;
-  onChangePasswordClick: () => void;
   isWritingToSheet?: boolean;
 }
 
@@ -84,9 +75,6 @@ export const ParentView: React.FC<Props> = ({
   onSelectUser,
   onSubmitRecord,
   onAddTask,
-  onOpenTasksModal,
-  onLockParentMode,
-  onChangePasswordClick,
   isWritingToSheet = false,
 }) => {
   // Filter only children (exclude admin ADM)
@@ -248,45 +236,6 @@ export const ParentView: React.FC<Props> = ({
 
   return (
     <div className="space-y-4 pb-24 animate-in fade-in duration-200">
-      {/* Header Banner with Lock & Change Password buttons */}
-      <div className="flex items-center justify-between p-4 rounded-2xl bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 text-white shadow-md shadow-orange-500/15">
-        <div className="flex items-center gap-2.5">
-          <div className="w-9 h-9 rounded-xl bg-white/20 backdrop-blur-xs flex items-center justify-center text-white">
-            <ShieldCheck className="w-5 h-5" />
-          </div>
-          <div>
-            <div className="flex items-center gap-1.5">
-              <h2 className="font-bold text-base">家長操作專區</h2>
-              <span className="text-[10px] bg-white/20 px-1.5 py-0.5 rounded font-mono">ADM 已驗證</span>
-            </div>
-            <p className="text-xs text-orange-100">管理每日任務、加分與扣分</p>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-1.5">
-          {/* Change Password */}
-          <button
-            type="button"
-            onClick={onChangePasswordClick}
-            className="p-2 rounded-xl bg-white/20 hover:bg-white/30 text-white transition active:scale-95 text-xs flex items-center gap-1"
-            title="修改家長密碼"
-          >
-            <KeyRound className="w-4 h-4" />
-          </button>
-
-          {/* Lock / Exit Parent Mode */}
-          <button
-            type="button"
-            onClick={onLockParentMode}
-            className="px-2.5 py-1.5 rounded-xl bg-white text-orange-700 hover:bg-orange-50 text-xs font-bold transition active:scale-95 flex items-center gap-1 shadow-xs"
-            title="鎖定並返回小孩檢視區"
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span>上鎖離開</span>
-          </button>
-        </div>
-      </div>
-
       {/* Main Operation Form */}
       <form onSubmit={handleSubmit} className="p-5 rounded-3xl bg-white border border-slate-200/80 shadow-xs space-y-4">
         {/* Step 1: Select Child */}

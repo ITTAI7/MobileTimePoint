@@ -88,7 +88,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
             {error && (
               <p className="text-xs text-rose-600 flex items-center gap-1 mt-1 animate-in fade-in">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
-                密碼錯誤，請重新輸入（預設為 77777777）
+                密碼錯誤，請重新輸入
               </p>
             )}
           </div>

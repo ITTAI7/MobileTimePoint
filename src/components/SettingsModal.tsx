@@ -127,7 +127,7 @@ export const SettingsModal: React.FC<Props> = ({
   };
 
   const handleResetPasswordToDefault = async () => {
-    if (confirm('確定要清除自訂密碼，還原為試算表原始預設密碼 (77777777) 嗎？')) {
+    if (confirm('確定要清除本機自訂密碼，改用試算表「使用者資料與餘額」中 ADM 的密碼嗎？')) {
       try {
         localStorage.removeItem('weekend_points_parent_password');
       } catch {
