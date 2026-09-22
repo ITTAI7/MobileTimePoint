@@ -1,4 +1,4 @@
-import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord, SheetAudit } from '../types';
+import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord, SheetAudit, RecalcResult } from '../types';
 
 export const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz39OiajdWzbMOroIMCtdU_JmtSE5zNq9wnoModKLDEDuzcW3vzquh4Is1GJn1Ucw2P/exec';
 
@@ -187,12 +187,70 @@ export function parseAudit(raw: unknown): SheetAudit | null {
     return { userId: String(o.userId ?? ''), sum: Number(o.sum) || 0 };
   });
 
+  const duplicateLogIds = (Array.isArray(a.duplicateLogIds) ? a.duplicateLogIds : []).map((x) =>
+    String(x)
+  );
+
   return {
     ok: a.ok,
     mismatches,
     orphans,
+    duplicateLogIds,
     skipped: typeof a.skipped === 'string' ? a.skipped : undefined,
   };
+}
+
+/**
+ * 請伺服器以「點數存摺」為準重算餘額與總分。
+ *
+ * dryRun = true 只取得「會改什麼」，不寫入。
+ * 這個動作是冪等的（重算兩次結果相同），所以回應遺失時可以安全重試 ——
+ * 與 addLog 不同，那個重送會產生重複紀錄。
+ */
+export async function recalculateGoogleSheet(dryRun: boolean): Promise<RecalcResult> {
+  const empty = { dryRun, balanceRowsChanged: 0, totals: [], orphans: [] };
+
+  try {
+    const response = await fetch(getStoredApiUrl(), {
+      method: 'POST',
+      body: JSON.stringify({ action: 'recalculate', dryRun }),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      redirect: 'follow',
+    });
+
+    const text = await response.text();
+    const json = JSON.parse(text);
+
+    if (json.status !== 'success') {
+      return { ok: false, ...empty, message: json.message || '重新計算失敗' };
+    }
+
+    const totals = (Array.isArray(json.totals) ? json.totals : []).map(
+      (t: Record<string, unknown>) => ({
+        userId: String(t.userId ?? ''),
+        name: String(t.name ?? t.userId ?? ''),
+        from: Number(t.from) || 0,
+        to: Number(t.to) || 0,
+      })
+    );
+    const orphans = (Array.isArray(json.orphans) ? json.orphans : []).map(
+      (o: Record<string, unknown>) => ({
+        userId: String(o.userId ?? ''),
+        sum: Number(o.sum) || 0,
+      })
+    );
+
+    return {
+      ok: true,
+      dryRun: !!json.dryRun,
+      balanceRowsChanged: Number(json.balanceRowsChanged) || 0,
+      totals,
+      orphans,
+    };
+  } catch {
+    // 這裡不做 no-cors 後備：重算必須讀得到結果，讀不到就不能當成功
+    return { ok: false, ...empty, message: '連線失敗或回應無法解析，請稍後再試一次' };
+  }
 }
 
 export async function fetchSheetData(customUrl?: string): Promise<{

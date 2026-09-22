@@ -79,7 +79,26 @@ export interface SheetAudit {
   ok: boolean;
   mismatches: SheetAuditMismatch[];
   orphans: SheetAuditOrphan[];
+  /** 重複的 LogID，多半是複製整列貼上卻忘了改編號 */
+  duplicateLogIds: string[];
   skipped?: string;
+}
+
+/** 以存摺為準重算餘額的結果 */
+export interface RecalcTotal {
+  userId: string;
+  name: string;
+  from: number;
+  to: number;
+}
+
+export interface RecalcResult {
+  ok: boolean;
+  dryRun: boolean;
+  balanceRowsChanged: number;
+  totals: RecalcTotal[];
+  orphans: SheetAuditOrphan[];
+  message?: string;
 }
 
 export interface CleanTask {

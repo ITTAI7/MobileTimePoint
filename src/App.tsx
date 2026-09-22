@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit } from './types';
+import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit, RecalcResult } from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -10,6 +10,7 @@ import {
   getParentPassword,
   writeRecordToGoogleSheet,
   addNewTaskToGoogleSheet,
+  recalculateGoogleSheet,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -40,6 +41,9 @@ export default function App() {
   const [records, setRecords] = useState<CleanRecord[]>([]);
   const [rawResponse, setRawResponse] = useState<RawSheetResponse | null>(null);
   const [audit, setAudit] = useState<SheetAudit | null>(null);
+  const [recalcPreview, setRecalcPreview] = useState<RecalcResult | null>(null);
+  const [recalcBusy, setRecalcBusy] = useState(false);
+  const [recalcError, setRecalcError] = useState<string | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -268,6 +272,34 @@ export default function App() {
     return { ok: true, taskId: res.taskId };
   };
 
+  // 以存摺為準重算餘額。先跑 dryRun 取得「會改什麼」，確認後才真的寫入。
+  const handleRecalcPreview = async () => {
+    setRecalcBusy(true);
+    setRecalcError(null);
+    const res = await recalculateGoogleSheet(true);
+    setRecalcBusy(false);
+
+    if (!res.ok) {
+      setRecalcError(res.message || '無法取得重算結果');
+      return;
+    }
+    setRecalcPreview(res);
+  };
+
+  const handleRecalcApply = async () => {
+    setRecalcBusy(true);
+    setRecalcError(null);
+    const res = await recalculateGoogleSheet(false);
+    setRecalcBusy(false);
+
+    if (!res.ok) {
+      setRecalcError(res.message || '重新計算失敗');
+      return;
+    }
+    setRecalcPreview(null);
+    await loadData(true);
+  };
+
   // Reset Local Additions
   const handleResetLocalData = () => {
     localStorage.removeItem('weekend_points_local_logs_v1');
@@ -392,7 +424,11 @@ export default function App() {
 
         {/* 對帳警示：伺服器用完整歷史比對，發現明細加總與總分對不上時顯示。
             只提示不自動修正 —— 差異的原因不同，正確的修法也不同。 */}
-        {audit && !audit.ok && (audit.mismatches.length > 0 || audit.orphans.length > 0) && (
+        {audit &&
+          !audit.ok &&
+          (audit.mismatches.length > 0 ||
+            audit.orphans.length > 0 ||
+            audit.duplicateLogIds.length > 0) && (
           <div className="mb-4 p-3 rounded-2xl bg-orange-50 border border-orange-300 text-orange-900 text-xs">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-orange-600 shrink-0" />
@@ -426,9 +462,79 @@ export default function App() {
               </div>
             )}
 
+            {audit.duplicateLogIds.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-orange-200 space-y-1">
+                <p className="font-semibold">LogID 重複</p>
+                <p className="font-mono text-orange-700">
+                  {audit.duplicateLogIds.join('、')}
+                </p>
+                <p className="text-[11px] text-orange-700/90">
+                  多半是複製整列貼上忘了改編號。請在「點數存摺」把重複的改成不同編號。
+                  重新計算不會修這個。
+                </p>
+              </div>
+            )}
+
             <p className="mt-2 text-[11px] text-orange-700/90">
-              通常是在試算表手動刪改了紀錄但沒同步總分。請檢查「點數存摺」與「使用者資料與餘額」。
+              積分對不上通常是手動刪改了紀錄但沒同步總分。可以用下面的按鈕讓系統以存摺為準重算。
             </p>
+
+            {/* 重算：先預覽再套用，不直接改資料 */}
+            <div className="mt-2.5 pt-2.5 border-t border-orange-200">
+              {recalcError && (
+                <p className="mb-2 text-[11px] text-rose-700 font-medium">{recalcError}</p>
+              )}
+
+              {!recalcPreview ? (
+                <button
+                  onClick={handleRecalcPreview}
+                  disabled={recalcBusy}
+                  className="w-full py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
+                >
+                  {recalcBusy ? '計算中...' : '以存摺為準重新計算'}
+                </button>
+              ) : (
+                <div className="space-y-2">
+                  <p className="font-bold">將會這樣修正：</p>
+                  {recalcPreview.totals.length === 0 && recalcPreview.balanceRowsChanged === 0 ? (
+                    <p className="text-orange-700">沒有需要修正的地方。</p>
+                  ) : (
+                    <div className="space-y-1">
+                      {recalcPreview.totals.map((t) => (
+                        <div key={t.userId} className="flex items-center justify-between gap-2">
+                          <span className="font-semibold">{t.name} 總分</span>
+                          <span className="font-mono text-orange-700">
+                            {t.from} → <span className="font-bold">{t.to}</span>
+                          </span>
+                        </div>
+                      ))}
+                      {recalcPreview.balanceRowsChanged > 0 && (
+                        <p className="text-orange-700">
+                          另外修正存摺中 {recalcPreview.balanceRowsChanged} 列的餘額欄
+                        </p>
+                      )}
+                    </div>
+                  )}
+
+                  <div className="flex gap-2 pt-1">
+                    <button
+                      onClick={handleRecalcApply}
+                      disabled={recalcBusy}
+                      className="flex-1 py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
+                    >
+                      {recalcBusy ? '寫入中...' : '確認修正'}
+                    </button>
+                    <button
+                      onClick={() => setRecalcPreview(null)}
+                      disabled={recalcBusy}
+                      className="px-3 py-2 rounded-xl bg-white border border-orange-300 text-orange-800 text-xs font-medium hover:bg-orange-50 transition disabled:opacity-50"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
