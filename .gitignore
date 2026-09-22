@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+dev-dist/
+gas/
+package-lock.json

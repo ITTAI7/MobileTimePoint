@@ -43,6 +43,7 @@ export interface RawRecord {
   'Points (異動積分)'?: number | string;
   'Points (變動點數)'?: number | string;
   Points?: number | string;
+  'Current_Points (目前積分)'?: number | string;
   '目前積分'?: number | string;
   'Balance (剩餘點數)'?: number | string;
   Balance?: number | string;
@@ -57,6 +58,21 @@ export interface RawSheetResponse {
   '積分明細/點數存摺'?: RawRecord[];
   '使用者資料與餘額'?: RawUser[];
   [key: string]: unknown;
+}
+
+/** 伺服器用完整歷史比對「明細加總」與「使用者表總分」的結果 */
+export interface SheetAuditMismatch {
+  userId: string;
+  name: string;
+  stored: number;   // 使用者資料與餘額的目前積分
+  sum: number;      // 存摺所有異動的加總
+  diff: number;     // stored - sum
+}
+
+export interface SheetAudit {
+  ok: boolean;
+  mismatches: SheetAuditMismatch[];
+  skipped?: string;
 }
 
 export interface CleanTask {

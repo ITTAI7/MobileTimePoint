@@ -1,4 +1,4 @@
-import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord } from '../types';
+import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord, SheetAudit } from '../types';
 
 export const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz39OiajdWzbMOroIMCtdU_JmtSE5zNq9wnoModKLDEDuzcW3vzquh4Is1GJn1Ucw2P/exec';
 
@@ -134,7 +134,7 @@ export function parseCleanRecords(rawRecords?: RawRecord[], users?: CleanUser[])
     const rawPts = r['Points (異動積分)'] ?? r['Points (變動點數)'] ?? r.Points ?? 0;
     const points = typeof rawPts === 'number' ? rawPts : parseInt(String(rawPts), 10) || 0;
 
-    const rawBal = r['目前積分'] ?? r['Balance (剩餘點數)'] ?? r.Balance ?? 0;
+    const rawBal = r['Current_Points (目前積分)'] ?? r['目前積分'] ?? r['Balance (剩餘點數)'] ?? r.Balance ?? 0;
     const balanceAfter = typeof rawBal === 'number' ? rawBal : parseInt(String(rawBal), 10) || 0;
 
     const note = r['Note (備註說明)']
@@ -160,10 +160,39 @@ export function parseCleanRecords(rawRecords?: RawRecord[], users?: CleanUser[])
   });
 }
 
+/**
+ * 解析伺服器的對帳結果。
+ * 舊版 Apps Script 不會回傳 audit，這時回 null（視為「沒有對帳資訊」而非「有問題」）。
+ */
+export function parseAudit(raw: unknown): SheetAudit | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const a = raw as Record<string, unknown>;
+  if (typeof a.ok !== 'boolean') return null;
+
+  const items = Array.isArray(a.mismatches) ? a.mismatches : [];
+  const mismatches = items.map((item) => {
+    const m = (item || {}) as Record<string, unknown>;
+    return {
+      userId: String(m.userId ?? ''),
+      name: String(m.name ?? m.userId ?? ''),
+      stored: Number(m.stored) || 0,
+      sum: Number(m.sum) || 0,
+      diff: Number(m.diff) || 0,
+    };
+  });
+
+  return {
+    ok: a.ok,
+    mismatches,
+    skipped: typeof a.skipped === 'string' ? a.skipped : undefined,
+  };
+}
+
 export async function fetchSheetData(customUrl?: string): Promise<{
   tasks: CleanTask[];
   users: CleanUser[];
   records: CleanRecord[];
+  audit: SheetAudit | null;
   raw: RawSheetResponse;
 }> {
   const url = customUrl || getStoredApiUrl();
@@ -183,9 +212,12 @@ export async function fetchSheetData(customUrl?: string): Promise<{
   const data: RawSheetResponse = await res.json();
   const tasks = parseCleanTasks(data['任務與配分表']);
   const users = parseCleanUsers(data['使用者資料與餘額']);
-  const records = parseCleanRecords(data['積分明細/點數存摺'], users);
+  const records = parseCleanRecords(
+    (data['積分明細/點數存摺'] as RawRecord[]) || (data['點數存摺'] as RawRecord[]),
+    users
+  );
 
-  return { tasks, users, records, raw: data };
+  return { tasks, users, records, audit: parseAudit(data.audit), raw: data };
 }
 
 // Local Storage helpers for seamless offline and instant updates
@@ -235,6 +267,41 @@ export function clearLocalData() {
   }
 }
 
+/* ─────────────── 週結算區間（星期日 ~ 星期六） ─────────────── */
+
+export interface WeekRange {
+  start: Date;  // 星期日 00:00:00
+  end: Date;    // 下個星期日 00:00:00（不含）
+}
+
+/** 取得 ref 所屬那一週的區間，以本機時區的星期日為起點 */
+export function getWeekRange(ref: Date = new Date()): WeekRange {
+  const start = new Date(ref);
+  start.setHours(0, 0, 0, 0);
+  start.setDate(start.getDate() - start.getDay()); // getDay(): 0 = 星期日
+  const end = new Date(start);
+  end.setDate(end.getDate() + 7);
+  return { start, end };
+}
+
+/**
+ * 判斷一筆紀錄是否落在指定週內。
+ * 時間格式無法解析時一律保留 —— 寧可多顯示，也不要讓資料悄悄消失。
+ */
+export function isInWeek(timestamp: string, range: WeekRange): boolean {
+  const t = new Date(timestamp).getTime();
+  if (isNaN(t)) return true;
+  return t >= range.start.getTime() && t < range.end.getTime();
+}
+
+/** 顯示用標籤，例如：9/21（日）– 9/27（六） */
+export function formatWeekLabel(range: WeekRange): string {
+  const last = new Date(range.end);
+  last.setDate(last.getDate() - 1);
+  const f = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
+  return `${f(range.start)}（日）– ${f(last)}（六）`;
+}
+
 // Convert points to weekend screen time (default rule based on T05: 10 points = 30 min, meaning 1 point = 3 minutes)
 export function pointsToTime(points: number): { minutes: number; text: string; hours: number; remainingMins: number } {
   const safePoints = Math.max(0, points);
@@ -257,6 +324,7 @@ export function pointsToTime(points: number): { minutes: number; text: string; h
 export interface WriteRecordResult {
   success: boolean;
   message?: string;
+  code?: string;
   isMissingDoPost?: boolean;
 }
 
@@ -282,6 +350,8 @@ export async function writeRecordToGoogleSheet(
     userId: record.userId,
     userName: record.userName,
     taskName: record.taskName,
+    // 伺服器靠 category 判斷是否為兌換（兌換不得透支）
+    category: record.category,
     points: record.points,
     note: record.note || '',
     newBalance: newBalance,
@@ -310,6 +380,14 @@ export async function writeRecordToGoogleSheet(
       const json = JSON.parse(responseText);
       if (json.status === 'success' || json.success) {
         return { success: true, message: '已成功寫入 Google Sheet！' };
+      }
+      // 伺服器明確拒絕（例如兌換點數不足）——必須回報失敗，不能當成成功
+      if (json.status === 'error') {
+        return {
+          success: false,
+          code: json.code,
+          message: json.message || '寫入 Google Sheet 失敗',
+        };
       }
     } catch {
       if (response.ok) {
@@ -402,10 +480,9 @@ export async function addNewTaskToGoogleSheet(task: {
   note?: string;
 }): Promise<{ success: boolean; taskId?: string; message?: string }> {
   const apiUrl = getStoredApiUrl();
-  const taskId = 'T' + String(Date.now()).slice(-4);
+  // 不在前端編號：前端不知道試算表現在編到幾號，一律由伺服器接續產生
   const payload = {
     action: 'addTask',
-    taskId: taskId,
     category: task.category,
     taskName: task.name,
     points: task.points,
@@ -426,14 +503,14 @@ export async function addNewTaskToGoogleSheet(task: {
     try {
       const json = JSON.parse(responseText);
       if (json.status === 'success' || json.success) {
-        return { success: true, taskId: json.taskId || taskId, message: '自訂項目已新增至任務與配分表！' };
+        return { success: true, taskId: json.taskId, message: '自訂項目已新增至任務與配分表！' };
       }
     } catch {
       if (response.ok) {
-        return { success: true, taskId };
+        return { success: true };
       }
     }
-    return { success: true, taskId };
+    return { success: true };
   } catch (err: unknown) {
     try {
       await fetch(apiUrl, {
@@ -444,159 +521,9 @@ export async function addNewTaskToGoogleSheet(task: {
           'Content-Type': 'text/plain;charset=utf-8',
         },
       });
-      return { success: true, taskId };
+      return { success: true };
     } catch (e2: unknown) {
       return { success: false, message: '同步新增至 Google Sheet 失敗' };
     }
   }
 }
-
-export const RECOMMENDED_GAS_CODE = `/**
- * 週末手機時間積分獎勵系統 - Google Apps Script 完整後端程式碼
- * 支援：
- * 1. doGet(e) - 讀取所有工作表 (任務與配分表、積分明細/點數存摺、使用者資料與餘額)
- * 2. doPost(e) - 支援：
- *    - action === "updatePassword"：更新「使用者資料與餘額」家長密碼
- *    - action === "addTask"：新增項目至「任務與配分表」
- *    - 登記任務：寫入「積分明細/點數存摺」並同步更新孩子「目前積分」
- */
-
-function doGet(e) {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-  var sheets = ss.getSheets();
-  var result = {};
-  
-  sheets.forEach(function(sheet) {
-    var sheetName = sheet.getName().trim();
-    var data = sheet.getDataRange().getValues();
-    if (data.length > 1) {
-      var headers = data[0];
-      var rows = [];
-      for (var i = 1; i < data.length; i++) {
-        var row = {};
-        var hasContent = false;
-        for (var j = 0; j < headers.length; j++) {
-          var key = String(headers[j]).trim();
-          if (key) {
-            row[key] = data[i][j];
-            if (data[i][j] !== "" && data[i][j] !== null && data[i][j] !== undefined) {
-              hasContent = true;
-            }
-          }
-        }
-        if (hasContent) {
-          rows.push(row);
-        }
-      }
-      result[sheetName] = rows;
-    } else {
-      result[sheetName] = [];
-    }
-  });
-
-  return ContentService.createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-function doPost(e) {
-  try {
-    var data = JSON.parse(e.postData.contents);
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    
-    // 【操作 1】更新家長密碼
-    if (data.action === "updatePassword") {
-      var sheetUser = ss.getSheetByName("使用者資料與餘額") || ss.getSheetByName("使用者資料") || ss.getSheets()[2];
-      if (sheetUser) {
-        var userValues = sheetUser.getDataRange().getValues();
-        var headers = userValues[0];
-        var userIdCol = -1;
-        var passCol = -1;
-        
-        for (var c = 0; c < headers.length; c++) {
-          var colName = String(headers[c]);
-          if (colName.indexOf("UserID") !== -1 || colName.indexOf("ID") !== -1) userIdCol = c;
-          if (colName.indexOf("密碼") !== -1 || colName.indexOf("Password") !== -1) passCol = c;
-        }
-        
-        var targetUserId = String(data.userId || "ADM").trim();
-        if (userIdCol !== -1 && passCol !== -1) {
-          for (var r = 1; r < userValues.length; r++) {
-            if (String(userValues[r][userIdCol]).trim() === targetUserId) {
-              sheetUser.getRange(r + 1, passCol + 1).setValue(String(data.newPassword));
-              return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "密碼已更新至試算表" }))
-                .setMimeType(ContentService.MimeType.JSON);
-            }
-          }
-        }
-      }
-      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "找不到使用者資料或密碼欄位" }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    // 【操作 2】新增任務至「任務與配分表」
-    if (data.action === "addTask") {
-      var sheetTask = ss.getSheetByName("任務與配分表") || ss.getSheetByName("任務配分表") || ss.getSheets()[0];
-      if (sheetTask) {
-        var lastRow = sheetTask.getLastRow();
-        var taskId = data.taskId || ("T" + (lastRow < 10 ? "0" + lastRow : lastRow));
-        var category = String(data.category || "加分項目").trim();
-        var taskName = String(data.taskName || "").trim();
-        var points = Number(data.points) || 0;
-        var note = String(data.note || "").trim();
-        
-        // 欄位順序：TaskID, Category (類別), Task_Name (任務名稱), Default_Points (預設分數), 備註
-        sheetTask.appendRow([taskId, category, taskName, points, note]);
-        return ContentService.createTextOutput(JSON.stringify({ status: "success", taskId: taskId, message: "已新增至任務與配分表" }))
-          .setMimeType(ContentService.MimeType.JSON);
-      }
-      return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "找不到任務與配分表" }))
-        .setMimeType(ContentService.MimeType.JSON);
-    }
-    
-    // 【操作 3】登記點數異動 (積分明細與更新使用者目前餘額)
-    // 1. 寫入「積分明細/點數存摺」
-    var sheetLog = ss.getSheetByName("積分明細/點數存摺") || ss.getSheetByName("積分明細") || ss.getSheets()[1];
-    var timestamp = data.timestamp || Utilities.formatDate(new Date(), "Asia/Taipei", "yyyy/MM/dd HH:mm:ss");
-    var logId = data.logId || ("L" + new Date().getTime());
-    var userId = data.userId || "";
-    var taskName = data.taskName || "";
-    var points = Number(data.points) || 0;
-    var note = data.note || "";
-    
-    // 依據欄位順序：LogID, Timestamp (時間戳記), UserID (對象), Task_Name (項目), Points (異動積分), Note (備註說明)
-    sheetLog.appendRow([logId, timestamp, userId, taskName, points, note]);
-    
-    // 2. 更新「使用者資料與餘額」中對應孩子的「Current_Points (目前積分)」
-    var sheetUser = ss.getSheetByName("使用者資料與餘額") || ss.getSheetByName("使用者資料") || ss.getSheets()[2];
-    if (sheetUser && userId) {
-      var userValues = sheetUser.getDataRange().getValues();
-      var headers = userValues[0];
-      var userIdCol = -1;
-      var pointsCol = -1;
-      
-      for (var c = 0; c < headers.length; c++) {
-        var colName = String(headers[c]);
-        if (colName.indexOf("UserID") !== -1 || colName.indexOf("ID") !== -1) userIdCol = c;
-        if (colName.indexOf("Current_Points") !== -1 || colName.indexOf("目前積分") !== -1) pointsCol = c;
-      }
-      
-      if (userIdCol !== -1 && pointsCol !== -1) {
-        for (var r = 1; r < userValues.length; r++) {
-          if (String(userValues[r][userIdCol]).trim() === String(userId).trim()) {
-            var currentVal = Number(userValues[r][pointsCol]) || 0;
-            var newTotal = (data.newBalance !== undefined && data.newBalance !== null) ? Number(data.newBalance) : (currentVal + points);
-            sheetUser.getRange(r + 1, pointsCol + 1).setValue(newTotal);
-            break;
-          }
-        }
-      }
-    }
-    
-    return ContentService.createTextOutput(JSON.stringify({ status: "success", logId: logId }))
-      .setMimeType(ContentService.MimeType.JSON);
-  } catch (err) {
-    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-}
-`;

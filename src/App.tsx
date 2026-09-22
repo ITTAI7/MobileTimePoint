@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { CleanTask, CleanUser, CleanRecord, RawSheetResponse } from './types';
+import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit } from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -9,6 +9,7 @@ import {
   clearLocalData,
   getParentPassword,
   writeRecordToGoogleSheet,
+  addNewTaskToGoogleSheet,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -38,6 +39,7 @@ export default function App() {
   const [users, setUsers] = useState<CleanUser[]>(INITIAL_USERS_SEED);
   const [records, setRecords] = useState<CleanRecord[]>([]);
   const [rawResponse, setRawResponse] = useState<RawSheetResponse | null>(null);
+  const [audit, setAudit] = useState<SheetAudit | null>(null);
 
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -82,6 +84,7 @@ export default function App() {
     try {
       const data = await fetchSheetData();
       setRawResponse(data.raw);
+      setAudit(data.audit);
 
       // Tasks
       if (data.tasks.length > 0) {
@@ -98,11 +101,15 @@ export default function App() {
         setEffectivePassword(getParentPassword(foundAdmin.password));
       }
 
-      // If selectedUserId is not in children, default to first child
+      // If selectedUserId is not in children, default to first child.
+      // 這裡用 functional update 讀取目前選取的孩子，loadData 才不需要相依 selectedUserId
+      // ——否則每次切換哥哥/妹妹都會重新抓一次整份 Google Sheet。
       const childrenOnly = mergedUsers.filter((u) => !u.isAdmin && u.id.toUpperCase() !== 'ADM' && u.name !== '家長');
-      if (childrenOnly.length > 0 && !childrenOnly.some((u) => u.id === selectedUserId)) {
-        setSelectedUserId(childrenOnly[0].id);
-      }
+      setSelectedUserId((prev) =>
+        childrenOnly.length > 0 && !childrenOnly.some((u) => u.id === prev)
+          ? childrenOnly[0].id
+          : prev
+      );
 
       // Records: Directly sync with Google Sheet records (if sheet is cleared to empty, display empty records)
       const sortedRecords = [...data.records].sort(
@@ -136,7 +143,7 @@ export default function App() {
       setIsLoading(false);
       setIsRefreshing(false);
     }
-  }, [selectedUserId]);
+  }, []);
 
   useEffect(() => {
     loadData();
@@ -171,7 +178,7 @@ export default function App() {
   // Handle Parent Submitting a Point Adjustment Record
   const handleParentSubmitRecord = async (
     newRecordData: Omit<CleanRecord, 'id' | 'timestamp' | 'balanceAfter' | 'isLocal'>
-  ) => {
+  ): Promise<{ ok: boolean; message?: string }> => {
     // 1. Calculate new points for the targeted child
     const userToUpdate = users.find((u) => u.id === newRecordData.userId);
     const prevPoints = userToUpdate ? userToUpdate.currentPoints : 0;
@@ -209,12 +216,56 @@ export default function App() {
     // 5. Trigger writing to Google Sheet via doPost
     setIsWritingToSheet(true);
     try {
-      await writeRecordToGoogleSheet(createdRecord, newBalance);
+      const result = await writeRecordToGoogleSheet(createdRecord, newBalance);
+
+      // 伺服器明確拒絕（例如兌換點數不足）：把上面的樂觀更新全部回復，
+      // 否則畫面會留下一筆試算表根本沒收下的紀錄。
+      if (!result.success) {
+        setUsers(users);
+        const revertMap = getLocalUsersOverride();
+        revertMap[newRecordData.userId] = prevPoints;
+        saveLocalUsersOverride(revertMap);
+
+        saveLocalLogs(currentLocalLogs);
+        setRecords((prev) => prev.filter((r) => r.id !== createdRecord.id));
+
+        return { ok: false, message: result.message || '寫入 Google Sheet 失敗' };
+      }
+
+      return { ok: true };
     } catch (err) {
       console.warn('writeRecordToGoogleSheet error:', err);
+      return { ok: true };
     } finally {
       setIsWritingToSheet(false);
     }
+  };
+
+  // 新增自訂項目到「任務與配分表」。
+  // 這個動作放在 App 而不是 ParentView，因為 tasks 狀態在這裡 ——
+  // 寫入試算表後要立刻把新項目補進清單，不能等下次重新載入才出現。
+  const handleAddTask = async (task: {
+    category: string;
+    name: string;
+    points: number;
+    note?: string;
+  }): Promise<{ ok: boolean; taskId?: string; message?: string }> => {
+    const res = await addNewTaskToGoogleSheet(task);
+    if (!res.success) {
+      return { ok: false, message: res.message || '新增項目至試算表失敗' };
+    }
+
+    // no-cors 後備路徑讀不到回應，拿不到伺服器編號時先用暫時 id，
+    // 下次重新載入會被試算表的真實編號整份取代。
+    const newTask: CleanTask = {
+      id: res.taskId || `T-pending-${Date.now()}`,
+      category: task.category,
+      name: task.name,
+      points: task.points,
+    };
+
+    setTasks((prev) => (prev.some((t) => t.id === newTask.id) ? prev : [...prev, newTask]));
+    return { ok: true, taskId: res.taskId };
   };
 
   // Reset Local Additions
@@ -339,6 +390,33 @@ export default function App() {
           </div>
         )}
 
+        {/* 對帳警示：伺服器用完整歷史比對，發現明細加總與總分對不上時顯示。
+            只提示不自動修正 —— 差異的原因不同，正確的修法也不同。 */}
+        {audit && !audit.ok && audit.mismatches.length > 0 && (
+          <div className="mb-4 p-3 rounded-2xl bg-orange-50 border border-orange-300 text-orange-900 text-xs">
+            <div className="flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-orange-600 shrink-0" />
+              <p className="font-bold">積分與明細對不上</p>
+            </div>
+            <div className="mt-2 space-y-1">
+              {audit.mismatches.map((m) => (
+                <div key={m.userId} className="flex items-center justify-between gap-2 font-mono">
+                  <span className="font-sans font-semibold">{m.name}</span>
+                  <span className="text-orange-700">
+                    總分 {m.stored} / 明細加總 {m.sum}
+                    <span className="ml-1 font-bold">
+                      （差 {m.diff > 0 ? '+' : ''}{m.diff}）
+                    </span>
+                  </span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-orange-700/90">
+              通常是在試算表手動刪改了紀錄但沒同步總分。請檢查「點數存摺」與「使用者資料與餘額」。
+            </p>
+          </div>
+        )}
+
         {/* Loading State Skeleton */}
         {isLoading ? (
           <div className="space-y-4 py-8 text-center">
@@ -350,6 +428,7 @@ export default function App() {
           <KidView
             users={users}
             records={records}
+            tasks={tasks}
             selectedUserId={selectedUserId}
             onSelectUser={setSelectedUserId}
             onRefresh={() => loadData(true)}
@@ -362,6 +441,7 @@ export default function App() {
             selectedUserId={selectedUserId}
             onSelectUser={setSelectedUserId}
             onSubmitRecord={handleParentSubmitRecord}
+            onAddTask={handleAddTask}
             onOpenTasksModal={() => setShowTasksModal(true)}
             onLockParentMode={handleLockParentMode}
             onChangePasswordClick={() => setShowChangePasswordModal(true)}

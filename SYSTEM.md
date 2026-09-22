@@ -1,0 +1,217 @@
+# SYSTEM — 系統規格與部署說明
+
+給接手建置／部署本專案的人或 AI agent。使用說明請看 `note.md`。
+
+---
+
+## 1. 系統概觀
+
+**MobileTimePoint** — 家庭用的週末手機時間積分獎勵 PWA。
+
+```
+瀏覽器 (React SPA / PWA)
+        │  fetch  HTTPS
+        ▼
+Google Apps Script Web App  (/exec)
+        │
+        ▼
+Google 試算表（3 個分頁，唯一的資料來源）
+```
+
+**沒有自己的後端伺服器。** 前端是純靜態產出，資料的讀寫全部打 Google Apps Script。
+部署時只需要一個靜態檔案主機，不需要 Node runtime、不需要資料庫。
+
+---
+
+## 2. 技術棧
+
+| 項目 | 版本 | 備註 |
+|---|---|---|
+| React | 19 | |
+| Vite | 8.3 | rolldown-based |
+| Tailwind CSS | 4.3 | 透過 `@tailwindcss/vite` |
+| vite-plugin-pwa | 1.3 | `generateSW` 模式，autoUpdate |
+| TypeScript | 7.0 | 僅型別檢查，不參與建置 |
+| lucide-react / motion | | 圖示與動畫 |
+
+建置驗證環境：Node 24.16.0、npm 11.13.0。
+
+**`esbuild` 必須維持 `^0.28.0`。** Vite 8 的 peer dependency 要求 `^0.27.0 || ^0.28.0`，
+專案原本宣告的 `^0.25.0` 會讓 `npm install` 直接 ERESOLVE 失敗。
+
+**倉庫內沒有 lock 檔。** 原本的 `bun.lock` 仍鎖著修正前的 `esbuild ^0.25.0`，
+與上述修正衝突，已移除以免安裝到裝不起來的舊版本。
+安裝時會依 `package.json` 的版本範圍重新解析，並產生該套件管理器自己的 lock 檔。
+
+---
+
+## 3. 建置與部署
+
+```bash
+npm install
+npm run lint     # tsc --noEmit，目前零錯誤
+npm run build    # 產出到 dist/
+```
+
+已驗證的建置結果（約 9 秒）：
+
+```
+dist/index.html                   1.70 kB
+dist/assets/index-*.css          48.35 kB │ gzip   8.26 kB
+dist/assets/index-*.js          417.02 kB │ gzip 126.93 kB
+dist/manifest.webmanifest
+dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
+```
+
+**部署方式：把 `dist/` 整個目錄當靜態網站託管即可。** 不需要 SSR、不需要 API 代理。
+
+其他指令：`npm run dev`（port 3000、`--host 0.0.0.0`）、`npm run preview`。
+`npm run clean` 裡提到的 `server.js` 並不存在，是樣板殘留。
+
+### 部署限制（重要）
+
+1. **必須掛在網域根目錄。**
+   PWA manifest 的 `id` / `start_url` / `scope` 都是 `/`（見 `vite.config.ts`）。
+   若要部署到子路徑，必須同時修改 Vite 的 `base` 與 manifest 這三個欄位，否則 Service Worker 與「安裝 App」會失效。
+
+2. **必須是 HTTPS**（`localhost` 除外），否則 Service Worker 不會註冊，PWA 功能全失。
+
+3. **瀏覽器要連得到 `script.google.com`。**
+   資料是從使用者的瀏覽器直接打 Apps Script，不經過部署主機。若使用者所在網路封鎖該網域，App 會退回本機快取模式並顯示警示橫幅。
+
+4. **不需要任何環境變數。** 見第 6 節。
+
+---
+
+## 4. 後端 API 契約
+
+**後端原始碼不在本倉庫內。** 它只存在於 Google Apps Script 專案裡（開發者本機另有一份 `gas/Code.gs`）。
+部署前端**不需要**動到後端；Apps Script 已經是部署好的狀態，前端只是呼叫它。
+
+若需要修改後端，必須手動貼進 Apps Script 編輯器並重新部署 —— 沒有自動化流程。
+
+重新部署務必走：**部署 → 管理部署作業 → 選現有部署 → 編輯（鉛筆）→ 版本選「新版本」→ 部署**。
+使用「新增部署作業」會產生**全新的 `/exec` 網址**，舊網址立即 404，前端會整個連不上。
+
+### 讀取
+
+```
+GET  {EXEC_URL}              → 只回傳「本週」（週日~週六）的存摺紀錄
+GET  {EXEC_URL}?range=all    → 回傳完整歷史
+```
+
+回應：
+
+```json
+{
+  "status": "success",
+  "任務與配分表":        [ ... ],
+  "積分明細/點數存摺":   [ ... ],
+  "使用者資料與餘額":    [ ... ],
+  "range": "week",
+  "weekStart": "2026-09-19T16:00:00.000Z",
+  "weekEnd":   "2026-09-26T16:00:00.000Z",
+  "logsTotal": 11,
+  "timestamp": "..."
+}
+```
+
+### 寫入
+
+`POST {EXEC_URL}`，`Content-Type: text/plain;charset=utf-8`，body 為 JSON。
+用 `text/plain` 是為了避開 CORS preflight。
+
+| `action` | 用途 | 冪等 |
+|---|---|---|
+| `addLog`（省略時的預設） | 新增一筆點數異動，並同步更新使用者餘額 | **否** |
+| `addTask` | 新增任務項目，編號由伺服器接續產生 | **否** |
+| `updateLog` | 依 `logId` 修改既有紀錄的 `timestamp` / `taskName` / `note` | 是 |
+| `updatePassword` | 更新 ADM 的密碼 | 是 |
+
+回應一律是 `{"status": "success"|"error", ...}`。錯誤時可能帶 `code`：
+`INSUFFICIENT_POINTS`（兌換透支）、`LOG_NOT_FOUND`、`BUSY`（拿不到寫入鎖）。
+
+### 呼叫時的兩個陷阱
+
+**a) POST 的回應經常遺失，但寫入其實已經成功。**
+Apps Script 的 `/exec` 是「先執行 doPost，再 302 轉址去取結果」。轉址那一段會間歇性回 Google 的 404 頁面。**此時資料已經寫進試算表了。**
+
+→ 失敗時**先用 GET 核對資料在不在，不要盲目重試**。`addLog` / `addTask` 不是冪等的，重送會產生重複紀錄與重複扣分。
+
+**b) 用 curl 測試時不要加 `-X POST`。**
+
+```bash
+# 正確
+curl -sk -L --data-binary @payload.json \
+     -H 'Content-Type: text/plain;charset=utf-8' "$EXEC_URL"
+
+# 錯誤：-X POST 會讓 curl 在轉址後仍用 POST，得到 405
+# 錯誤：不加 --data-binary 而用管線餵入，會漏 Content-Length，得到 411
+```
+
+### 伺服器端的資料保護
+
+- **欄位以標題名稱比對**（`findCol_`），不依賴欄位順序，可自由調整試算表欄位位置。
+  注意 `Current_Points (目前積分)` 字串裡也含有 `Points`，所以找 Points 欄時會排除餘額欄。
+- **兌換不得透支**：類別含「兌換」且異動後餘額為負時拒絕。前端沒帶 `category` 時，伺服器會回任務表用任務名稱反查，所以直接呼叫 API 也繞不過。
+- **扣分可累計負分**，不受上述限制（刻意的設計）。
+- **餘額由伺服器計算**（讀試算表現值 + 異動量），不採用前端送來的 `newBalance`。
+- **所有寫入包在 `LockService` 內**，確保「讀現值 → 判斷 → 寫回」不可分割。
+
+---
+
+## 5. 前後端的耦合點（改動前務必確認）
+
+| 耦合點 | 位置 | 說明 |
+|---|---|---|
+| Apps Script 網址 | `src/utils/sheetData.ts` 第 3 行 `DEFAULT_GAS_API_URL` | 也可在 App 設定畫面覆寫，存在 localStorage |
+| doGet 輸出 key | Apps Script 的 `OUTPUT_KEYS` | **必須維持 `積分明細/點數存摺`**，前端讀這個名稱。與試算表分頁實際叫什麼無關 |
+| 試算表分頁名 | Apps Script 的 `SHEET_NAMES` | 分頁改名只需改這裡。目前容許 `點數存摺` / `積分明細/點數存摺` 兩種 |
+| 試算表欄位名 | 兩邊都有 | 前端 `parseClean*` 與後端 `findCol_` 都靠欄位名比對 |
+| 週的定義 | 前後端各一份 | 前端 `getWeekRange()`、後端 `weekRange_()`，皆為「週日 00:00 起、下週日 00:00 止」，邏輯必須一致 |
+
+**時區**：Apps Script 專案時區必須與試算表時區相同（目前為 `Asia/Taipei`），否則週的分界會偏移數小時。
+
+---
+
+## 6. 環境變數
+
+**本專案不需要任何環境變數。**
+
+`.env.example` 裡的 `GEMINI_API_KEY` 與 `APP_URL` 是 Google AI Studio 樣板殘留，程式碼完全沒有使用。
+`metadata.json` 宣告的 `MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API` 同理 —— 專案沒有任何 Gemini 呼叫。
+若部署平台不要求，這些都可以移除。
+
+`package.json` 中的 `@google/genai`、`express`、`dotenv` 同樣**沒有被任何原始碼引用**，可安全移除以縮小依賴。
+
+---
+
+## 7. 已知問題
+
+| 問題 | 影響 | 建議 |
+|---|---|---|
+| `vite.config.ts` 使用 `__dirname` | 目前只是警告，未來 Vite 版本會不支援 | 改用 `import.meta.dirname` |
+| 倉庫未納入 lock 檔 | 不同時間安裝可能取得不同的相依版本 | 若需可重現的建置，在部署環境提交該環境產生的 lock 檔 |
+| 家長密碼僅前端驗證 | 明碼寫在 bundle 與試算表，開 DevTools 即可看到 | 定位是「防小孩誤按」，**不是安全機制**。不要用它保護真正敏感的東西 |
+| 寫入失敗時的網路錯誤會走 `no-cors` 後備 | 該路徑讀不到回應，無法判斷成功與否 | 目前一律視為成功；靠使用者重新整理核對 |
+| 補登過去日期的紀錄需直接呼叫 API | App 介面只能記錄「當下」時間 | 若常用，可在家長操作區加日期選擇器 |
+
+---
+
+## 8. 檔案結構
+
+```
+src/
+  App.tsx                    狀態容器：載入資料、樂觀更新與失敗回滾、密碼鎖
+  types.ts                   試算表原始欄位 → 乾淨型別的對應
+  utils/sheetData.ts         資料層：API 讀寫、欄位容錯解析、週區間、localStorage 快取
+  components/
+    KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細
+    ParentView.tsx           家長操作區：分類選單、加扣分、兌換透支檢查
+    SettingsModal.tsx        API 網址設定、原始回應檢視、清除本機快取
+    TasksTableModal.tsx      配分表檢視
+    ParentPasswordModal.tsx / ChangePasswordModal.tsx
+    PWAInstallButton.tsx
+  hooks/                     useOnlineStatus、usePWAInstall
+scripts/generate-icons.js    產生 PWA 圖示的一次性工具
+```

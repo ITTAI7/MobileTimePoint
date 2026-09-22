@@ -1,6 +1,5 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { CleanUser, CleanTask, CleanRecord } from '../types';
-import { addNewTaskToGoogleSheet } from '../utils/sheetData';
 import { 
   Check, 
   Plus, 
@@ -24,11 +23,27 @@ interface Props {
   tasks: CleanTask[];
   selectedUserId: string;
   onSelectUser: (userId: string) => void;
-  onSubmitRecord: (record: Omit<CleanRecord, 'id' | 'timestamp' | 'balanceAfter' | 'isLocal'>) => Promise<boolean | void> | void;
+  onSubmitRecord: (
+    record: Omit<CleanRecord, 'id' | 'timestamp' | 'balanceAfter' | 'isLocal'>
+  ) => Promise<{ ok: boolean; message?: string }>;
+  onAddTask: (task: {
+    category: string;
+    name: string;
+    points: number;
+    note?: string;
+  }) => Promise<{ ok: boolean; taskId?: string; message?: string }>;
   onOpenTasksModal: () => void;
   onLockParentMode: () => void;
   onChangePasswordClick: () => void;
   isWritingToSheet?: boolean;
+}
+
+/** 分類按鈕選中時的配色，與小孩區的類別標籤一致 */
+function getCategoryPillActive(category: string): string {
+  if (category.includes('兌換')) return 'bg-purple-600 text-white border-purple-600 shadow-xs';
+  if (category.includes('扣分')) return 'bg-rose-600 text-white border-rose-600 shadow-xs';
+  if (category.includes('加分')) return 'bg-emerald-600 text-white border-emerald-600 shadow-xs';
+  return 'bg-blue-600 text-white border-blue-600 shadow-xs';
 }
 
 export const ParentView: React.FC<Props> = ({
@@ -37,6 +52,7 @@ export const ParentView: React.FC<Props> = ({
   selectedUserId,
   onSelectUser,
   onSubmitRecord,
+  onAddTask,
   onOpenTasksModal,
   onLockParentMode,
   onChangePasswordClick,
@@ -45,18 +61,40 @@ export const ParentView: React.FC<Props> = ({
   // Filter only children (exclude admin ADM)
   const childrenList = users.filter((u) => !u.isAdmin && u.id.toUpperCase() !== 'ADM' && u.name !== '家長');
   
-  // Exclude "兌換項目" as requested: 家長操作區移除積分兌換部份，專注於日常任務、加分與扣分
-  const parentTasks = tasks.filter((t) => !t.category.includes('兌換'));
+  // 依類別分組排序：每日任務 → 加分 → 扣分 → 兌換 → 其他。
+  // 兌換項目排最後，避免表單一打開就預設停在扣點的選項。
+  const categoryOrder = (category: string): number => {
+    if (category.includes('每日')) return 0;
+    if (category.includes('加分')) return 1;
+    if (category.includes('扣分')) return 2;
+    if (category.includes('兌換')) return 4;
+    return 3;
+  };
+
+  const parentTasks = [...tasks].sort(
+    (a, b) => categoryOrder(a.category) - categoryOrder(b.category)
+  );
+
+  // 類別清單，供步驟 2 的分類按鈕使用
+  const categories = useMemo(() => {
+    const seen: string[] = [];
+    parentTasks.forEach((t) => {
+      if (!seen.includes(t.category)) seen.push(t.category);
+    });
+    return seen;
+  }, [parentTasks]);
 
   // Form states
   const [isCustom, setIsCustom] = useState(false);
   const [selectedTaskId, setSelectedTaskId] = useState<string>(parentTasks[0]?.id || '');
+  const [selectedCategory, setSelectedCategory] = useState<string>(parentTasks[0]?.category || '');
   const [customTaskName, setCustomTaskName] = useState('');
   const [customCategory, setCustomCategory] = useState('加分項目');
   const [saveCustomToTaskList, setSaveCustomToTaskList] = useState(true);
   const [pointsChange, setPointsChange] = useState<number>(parentTasks[0]?.points || 2);
   const [note, setNote] = useState('');
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
 
   // Default to first child if selected is admin or not in children list
@@ -67,7 +105,20 @@ export const ParentView: React.FC<Props> = ({
     currentPoints: 0,
   };
 
-  const selectedPresetTask = parentTasks.find((t) => t.id === selectedTaskId);
+  // 任務是非同步載入的，初始 state 可能對不上實際資料，所以這裡都要有退路
+  const activeCategory = categories.includes(selectedCategory) ? selectedCategory : categories[0] || '';
+  const visibleTasks = parentTasks.filter((t) => t.category === activeCategory);
+  const selectedPresetTask = visibleTasks.find((t) => t.id === selectedTaskId) || visibleTasks[0];
+
+  const handleCategoryChange = (category: string) => {
+    setSelectedCategory(category);
+    setIsCustom(false);
+    const first = parentTasks.find((t) => t.category === category);
+    if (first) {
+      setSelectedTaskId(first.id);
+      setPointsChange(first.points);
+    }
+  };
 
   // Handle Preset Task Selection
   const handleTaskChange = (taskId: string) => {
@@ -90,6 +141,11 @@ export const ParentView: React.FC<Props> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
 
+    // 按鈕已停用，這裡再擋一次以防萬一
+    if (insufficientPoints) return;
+
+    setSubmitError(null);
+
     const taskName = isCustom
       ? customTaskName.trim() || '自訂項目'
       : selectedPresetTask?.name || '任務';
@@ -100,23 +156,28 @@ export const ParentView: React.FC<Props> = ({
     // If custom and user selected to save to sheet tasks table
     if (isCustom && saveCustomToTaskList) {
       setTaskSavedMessage('正在同步新增項目至「任務與配分表」...');
-      addNewTaskToGoogleSheet({
+      onAddTask({
         category,
         name: taskName,
         points: pointsChange,
         note: note.trim() || undefined,
-      }).then((res) => {
-        if (res.success) {
-          setTaskSavedMessage('自訂項目已成功寫入 Google Sheet「任務與配分表」！');
-        }
-      }).catch(() => {
-        // ignore background error
-      });
+      })
+        .then((res) => {
+          // onAddTask 成功後會直接更新任務清單，切回「任務選單」就看得到，不用重新載入
+          setTaskSavedMessage(
+            res.ok
+              ? `已新增至「任務與配分表」${res.taskId ? `（編號 ${res.taskId}）` : ''}，切到「任務選單」就能重複使用`
+              : res.message || '新增項目至試算表失敗'
+          );
+        })
+        .catch(() => {
+          setTaskSavedMessage('新增項目至試算表失敗');
+        });
     } else {
       setTaskSavedMessage(null);
     }
 
-    await onSubmitRecord({
+    const result = await onSubmitRecord({
       userId: currentChild.id,
       userName: currentChild.name,
       taskName,
@@ -124,6 +185,12 @@ export const ParentView: React.FC<Props> = ({
       points: pointsChange,
       note: note.trim() || undefined,
     });
+
+    // 伺服器拒絕（例如另一台裝置搶先兌換掉點數）：顯示原因，不要報成功
+    if (!result.ok) {
+      setSubmitError(result.message || '登記失敗，請重新整理後再試');
+      return;
+    }
 
     setSubmittedSuccess(true);
     setTimeout(() => {
@@ -138,6 +205,13 @@ export const ParentView: React.FC<Props> = ({
   };
 
   const newBalance = currentChild.currentPoints + pointsChange;
+
+  // 兌換不能透支：點數不夠就擋下來。
+  // 扣分項目則允許扣成負分（表現不好扣到欠點是合理的）。
+  const isRedeem = isCustom
+    ? customCategory.includes('兌換')
+    : !!selectedPresetTask?.category.includes('兌換');
+  const insufficientPoints = isRedeem && newBalance < 0;
 
   return (
     <div className="space-y-4 pb-24 animate-in fade-in duration-200">
@@ -232,9 +306,9 @@ export const ParentView: React.FC<Props> = ({
                 type="button"
                 onClick={() => {
                   setIsCustom(false);
-                  if (parentTasks[0]) {
-                    setSelectedTaskId(parentTasks[0].id);
-                    setPointsChange(parentTasks[0].points);
+                  if (visibleTasks[0]) {
+                    setSelectedTaskId(visibleTasks[0].id);
+                    setPointsChange(visibleTasks[0].points);
                   }
                 }}
                 className={`px-2.5 py-1 rounded-lg font-medium transition ${
@@ -259,18 +333,44 @@ export const ParentView: React.FC<Props> = ({
           </div>
 
           {!isCustom ? (
-            /* Dropdown selecting from preset tasks (excluding 兌換) */
+            /* 先用分類按鈕縮小範圍，下拉只列該分類 —— 手機上 15 個項目一次列完難讀 */
             <div className="space-y-2">
+              {categories.length > 1 && (
+                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5 -mx-0.5 px-0.5">
+                  {categories.map((cat) => {
+                    const active = cat === activeCategory;
+                    const count = parentTasks.filter((t) => t.category === cat).length;
+                    return (
+                      <button
+                        type="button"
+                        key={cat}
+                        onClick={() => handleCategoryChange(cat)}
+                        className={`shrink-0 px-2.5 py-1.5 rounded-xl text-xs font-medium border transition active:scale-95 ${
+                          active
+                            ? getCategoryPillActive(cat)
+                            : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+                        }`}
+                      >
+                        {cat}
+                        <span className={`ml-1 ${active ? 'opacity-70' : 'text-slate-400'}`}>
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
               <div className="relative">
                 <select
                   id="preset-task-select"
-                  value={selectedTaskId}
+                  value={selectedPresetTask?.id || ''}
                   onChange={(e) => handleTaskChange(e.target.value)}
                   className="w-full px-4 py-3 rounded-2xl bg-slate-50 border border-slate-200 text-slate-800 font-medium text-sm appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white pr-10"
                 >
-                  {parentTasks.map((task) => (
+                  {visibleTasks.map((task) => (
                     <option key={task.id} value={task.id}>
-                      [{task.category}] {task.name} ({task.points > 0 ? `+${task.points}` : task.points} 點)
+                      {task.name} ({task.points > 0 ? `+${task.points}` : task.points} 點)
                     </option>
                   ))}
                   <option value="__CUSTOM__">➕ 自訂全新項目...</option>
@@ -436,14 +536,34 @@ export const ParentView: React.FC<Props> = ({
           <div className="text-xl text-slate-400 font-mono">➜</div>
           <div className="text-right">
             <span className="text-slate-500 text-xs block">變動後新餘額</span>
-            <span className="font-black text-blue-700 text-base">{newBalance} 點</span>
+            <span
+              className={`font-black text-base ${
+                newBalance < 0 ? 'text-rose-600' : 'text-blue-700'
+              }`}
+            >
+              {newBalance} 點
+            </span>
           </div>
         </div>
+
+        {/* 兌換點數不足的阻擋提示 */}
+        {insufficientPoints && (
+          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-rose-800">點數不足，無法兌換</p>
+              <p className="text-rose-700 mt-0.5">
+                {currentChild.name}目前 {currentChild.currentPoints} 點，這項需要{' '}
+                {Math.abs(pointsChange)} 點，還差 {Math.abs(newBalance)} 點。
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Submit Button */}
         <button
           type="submit"
-          disabled={(pointsChange === 0 && !isCustom) || isWritingToSheet}
+          disabled={(pointsChange === 0 && !isCustom) || isWritingToSheet || insufficientPoints}
           className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-base shadow-md shadow-blue-500/25 hover:opacity-95 active:scale-98 transition flex items-center justify-center gap-2 disabled:opacity-50"
         >
           {isWritingToSheet ? (
@@ -458,6 +578,20 @@ export const ParentView: React.FC<Props> = ({
             </>
           )}
         </button>
+
+        {/* 伺服器拒絕的錯誤訊息 */}
+        {submitError && (
+          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-rose-800">登記失敗，已還原</p>
+              <p className="text-rose-700 mt-0.5">{submitError}</p>
+              <p className="text-rose-600/80 mt-1">
+                點數與紀錄都沒有變動。請按右上角重新整理取得最新餘額後再試。
+              </p>
+            </div>
+          </div>
+        )}
 
         {/* Feedback Alert */}
         {submittedSuccess && (

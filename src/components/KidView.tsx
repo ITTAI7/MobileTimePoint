@@ -1,6 +1,6 @@
-import React, { useState } from 'react';
-import { CleanUser, CleanRecord } from '../types';
-import { pointsToTime } from '../utils/sheetData';
+import React, { useMemo, useState } from 'react';
+import { CleanUser, CleanRecord, CleanTask } from '../types';
+import { pointsToTime, getWeekRange, isInWeek, formatWeekLabel } from '../utils/sheetData';
 import { 
   Sparkles, 
   Smartphone, 
@@ -18,6 +18,7 @@ import { motion, AnimatePresence } from 'motion/react';
 interface Props {
   users: CleanUser[];
   records: CleanRecord[];
+  tasks: CleanTask[];
   selectedUserId: string;
   onSelectUser: (userId: string) => void;
   onRefresh: () => void;
@@ -27,6 +28,7 @@ interface Props {
 export const KidView: React.FC<Props> = ({
   users,
   records,
+  tasks,
   selectedUserId,
   onSelectUser,
   onRefresh,
@@ -47,9 +49,33 @@ export const KidView: React.FC<Props> = ({
 
   const timeInfo = pointsToTime(currentUser.currentPoints);
 
-  // Filter records for this child
+  // 本週區間（星期日 ~ 星期六）
+  const week = useMemo(() => getWeekRange(), []);
+
+  // 「點數存摺」沒有類別欄，紀錄解析出來一律是「一般」。
+  // 這裡回「任務與配分表」用任務名稱反查真正的類別，標籤與配色才有意義。
+  const categoryByTaskName = useMemo(() => {
+    const map: Record<string, string> = {};
+    tasks.forEach((t) => {
+      map[t.name] = t.category;
+    });
+    return map;
+  }, [tasks]);
+
+  const resolveCategory = (record: CleanRecord): string => {
+    const fromTasks = categoryByTaskName[record.taskName];
+    if (fromTasks) return fromTasks;
+    if (record.category && record.category !== '一般') return record.category;
+    // 自訂的兌換項目不在配分表裡，退回用名稱判斷
+    if (record.taskName.includes('兌換')) return '兌換項目';
+    return record.category || '一般';
+  };
+
+  // Filter records for this child，並且只留本週
   const childRecords = records.filter(
-    (r) => r.userId === currentUser.id || r.userName === currentUser.name || !r.userId
+    (r) =>
+      (r.userId === currentUser.id || r.userName === currentUser.name || !r.userId) &&
+      isInWeek(r.timestamp, week)
   );
 
   const filteredRecords = childRecords.filter((r) => {
@@ -58,12 +84,24 @@ export const KidView: React.FC<Props> = ({
     return true;
   });
 
-  // Calculate progress toward next 30-min phone time chunk (10 points)
-  const nextMilestone = 10;
+  // 兌換方案全部來自試算表的「兌換項目」，由便宜到貴排序。
+  // 以後在配分表新增或調整兌換方案，畫面自動跟著變，不用改程式。
+  const redeemTasks = useMemo(
+    () =>
+      tasks
+        .filter((t) => t.category.includes('兌換') && t.points < 0)
+        .map((t) => ({ ...t, cost: Math.abs(t.points) }))
+        .sort((a, b) => a.cost - b.cost),
+    [tasks]
+  );
+
+  // 進度條以「最便宜的兌換方案」為一段；試算表沒有兌換項目時退回 10 點
+  const cheapest = redeemTasks[0];
+  const nextMilestone = cheapest ? cheapest.cost : 10;
   const currentChunkProgress = (Math.max(0, currentUser.currentPoints) % nextMilestone) / nextMilestone * 100;
-  const pointsNeededForNext = currentUser.currentPoints >= 0 
-    ? nextMilestone - (currentUser.currentPoints % nextMilestone) 
-    : 10 + Math.abs(currentUser.currentPoints);
+  const pointsNeededForNext = currentUser.currentPoints >= 0
+    ? nextMilestone - (currentUser.currentPoints % nextMilestone)
+    : nextMilestone + Math.abs(currentUser.currentPoints);
 
   return (
     <div className="space-y-4 pb-20">
@@ -132,11 +170,30 @@ export const KidView: React.FC<Props> = ({
           <div className="mt-5 text-center">
             <p className="text-xs uppercase tracking-wider text-blue-200 font-semibold">目前剩餘積分</p>
             <div className="mt-1 flex items-baseline justify-center gap-2">
-              <span className="text-6xl font-black tracking-tight drop-shadow-sm">
+              {/* 負分用暖色示警，不要跟正常分數一樣是白的 */}
+              <span
+                className={`text-6xl font-black tracking-tight drop-shadow-sm ${
+                  currentUser.currentPoints < 0 ? 'text-rose-300' : 'text-white'
+                }`}
+              >
                 {currentUser.currentPoints}
               </span>
-              <span className="text-lg font-medium text-blue-200">點</span>
+              <span
+                className={`text-lg font-medium ${
+                  currentUser.currentPoints < 0 ? 'text-rose-200' : 'text-blue-200'
+                }`}
+              >
+                點
+              </span>
             </div>
+
+            {currentUser.currentPoints < 0 && (
+              <div className="mt-2 flex justify-center">
+                <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-rose-500 text-white text-[11px] font-bold shadow-sm">
+                  目前負分了，請好好表現!
+                </span>
+              </div>
+            )}
           </div>
 
           {/* Screen Time Conversion Box */}
@@ -161,11 +218,21 @@ export const KidView: React.FC<Props> = ({
               <div className="flex items-center justify-between text-xs text-blue-100 mb-1.5">
                 <span className="flex items-center gap-1">
                   <Sparkles className="w-3 h-3 text-amber-300" />
-                  <span>每 10 點可兌換 30 分鐘</span>
+                  <span>
+                    {cheapest
+                      ? `每 ${cheapest.cost} 點可兌換 ${shortRedeemLabel(cheapest.name)}`
+                      : '尚未設定兌換方案'}
+                  </span>
                 </span>
-                <span>
-                  {pointsNeededForNext === 10
-                    ? '滿 10 點即可兌換'
+                <span
+                  className={`px-2 py-0.5 rounded-full font-bold ${
+                    currentUser.currentPoints >= nextMilestone
+                      ? 'bg-emerald-400 text-emerald-950'
+                      : 'bg-amber-400 text-amber-950'
+                  }`}
+                >
+                  {currentUser.currentPoints >= nextMilestone
+                    ? '現在就可以兌換'
                     : `再 ${pointsNeededForNext} 點滿一段`}
                 </span>
               </div>
@@ -180,56 +247,48 @@ export const KidView: React.FC<Props> = ({
         </div>
       </motion.div>
 
-      {/* Screen Time Exchange Rules & Milestones Quick Card */}
-      <div className="grid grid-cols-3 gap-2.5">
-        <div className="p-3 rounded-2xl bg-white border border-slate-200/80 shadow-xs text-center">
-          <p className="text-[11px] text-slate-500 font-medium">兌換 30 分鐘</p>
-          <p className="text-base font-bold text-slate-800 mt-0.5">10 點</p>
-          <div className="mt-1">
-            <span
-              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                currentUser.currentPoints >= 10
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-slate-100 text-slate-500'
-              }`}
-            >
-              {currentUser.currentPoints >= 10 ? '可兌換' : '差 ' + Math.max(0, 10 - currentUser.currentPoints) + ' 點'}
-            </span>
-          </div>
+      {/* 兌換方案：全部讀自試算表的「兌換項目」 */}
+      {redeemTasks.length > 0 && (
+        <div className={`grid gap-2.5 ${redeemTasks.length <= 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+          {redeemTasks.map((task) => {
+            const affordable = currentUser.currentPoints >= task.cost;
+            return (
+              <div
+                key={task.id}
+                title={task.name}
+                className={`p-3 rounded-2xl text-center transition ${
+                  affordable
+                    ? 'bg-emerald-50/60 border-2 border-emerald-400 shadow-sm shadow-emerald-500/10'
+                    : 'bg-white border border-slate-200/80 shadow-xs'
+                }`}
+              >
+                <p className="text-[11px] text-slate-500 font-medium truncate">
+                  兌換 {shortRedeemLabel(task.name)}
+                </p>
+                <p
+                  className={`text-base font-bold mt-0.5 ${
+                    affordable ? 'text-emerald-700' : 'text-slate-800'
+                  }`}
+                >
+                  {task.cost} 點
+                </p>
+                <div className="mt-1">
+                  <span
+                    className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                      affordable
+                        ? 'bg-emerald-500 text-white shadow-sm'
+                        : 'bg-amber-400 text-amber-950'
+                    }`}
+                  >
+                    {/* 負分時差距要從負數起算：−3 到 10 是差 13，不是差 10 */}
+                    {affordable ? '可兌換' : `差 ${task.cost - currentUser.currentPoints} 點`}
+                  </span>
+                </div>
+              </div>
+            );
+          })}
         </div>
-
-        <div className="p-3 rounded-2xl bg-white border border-slate-200/80 shadow-xs text-center">
-          <p className="text-[11px] text-slate-500 font-medium">兌換 60 分鐘</p>
-          <p className="text-base font-bold text-slate-800 mt-0.5">20 點</p>
-          <div className="mt-1">
-            <span
-              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                currentUser.currentPoints >= 20
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-slate-100 text-slate-500'
-              }`}
-            >
-              {currentUser.currentPoints >= 20 ? '可兌換' : '差 ' + Math.max(0, 20 - currentUser.currentPoints) + ' 點'}
-            </span>
-          </div>
-        </div>
-
-        <div className="p-3 rounded-2xl bg-white border border-slate-200/80 shadow-xs text-center">
-          <p className="text-[11px] text-slate-500 font-medium">兌換 90 分鐘</p>
-          <p className="text-base font-bold text-slate-800 mt-0.5">30 點</p>
-          <div className="mt-1">
-            <span
-              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-medium ${
-                currentUser.currentPoints >= 30
-                  ? 'bg-emerald-50 text-emerald-700'
-                  : 'bg-slate-100 text-slate-500'
-              }`}
-            >
-              {currentUser.currentPoints >= 30 ? '可兌換' : '差 ' + Math.max(0, 30 - currentUser.currentPoints) + ' 點'}
-            </span>
-          </div>
-        </div>
-      </div>
+      )}
 
       {/* Recent Records Section (最近紀錄) */}
       <div className="rounded-3xl bg-white border border-slate-200/80 shadow-xs p-5">
@@ -239,8 +298,8 @@ export const KidView: React.FC<Props> = ({
               <History className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-semibold text-slate-800 text-base">最近積分紀錄</h3>
-              <p className="text-xs text-slate-500">點數存摺明細</p>
+              <h3 className="font-semibold text-slate-800 text-base">本週積分紀錄</h3>
+              <p className="text-xs text-slate-500">{formatWeekLabel(week)}</p>
             </div>
           </div>
 
@@ -286,13 +345,16 @@ export const KidView: React.FC<Props> = ({
               <div className="w-12 h-12 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-2">
                 <CheckCircle2 className="w-6 h-6" />
               </div>
-              <p className="text-sm font-medium text-slate-600">尚無相關積分明細</p>
+              <p className="text-sm font-medium text-slate-600">本週尚無積分明細</p>
               <p className="text-xs text-slate-400 mt-0.5">
                 家長可以在「家長操作區」記錄任務完成與加扣分！
               </p>
             </div>
           ) : (
             filteredRecords.map((record) => {
+              const category = resolveCategory(record);
+              // 兌換是開心的事（換到手機時間），不該跟扣分共用負面的紅色下箭頭
+              const isRedeem = category.includes('兌換');
               const isPositive = record.points > 0;
               const formattedDate = formatRecordTime(record.timestamp);
 
@@ -301,12 +363,16 @@ export const KidView: React.FC<Props> = ({
                   <div className="flex items-center gap-3 min-w-0">
                     <div
                       className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isPositive
+                        isRedeem
+                          ? 'bg-purple-50 text-purple-600'
+                          : isPositive
                           ? 'bg-emerald-50 text-emerald-600'
                           : 'bg-rose-50 text-rose-600'
                       }`}
                     >
-                      {isPositive ? (
+                      {isRedeem ? (
+                        <Smartphone className="w-5 h-5" />
+                      ) : isPositive ? (
                         <ArrowUpRight className="w-5 h-5" />
                       ) : (
                         <ArrowDownRight className="w-5 h-5" />
@@ -320,10 +386,10 @@ export const KidView: React.FC<Props> = ({
                         </span>
                         <span
                           className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${getCategoryBadgeColor(
-                            record.category
+                            category
                           )}`}
                         >
-                          {record.category}
+                          {category}
                         </span>
                         {record.isLocal && (
                           <span className="text-[10px] bg-slate-100 text-slate-500 px-1 rounded">
@@ -346,7 +412,11 @@ export const KidView: React.FC<Props> = ({
                   <div className="text-right shrink-0">
                     <div
                       className={`text-base font-bold font-mono ${
-                        isPositive ? 'text-emerald-600' : 'text-rose-600'
+                        isRedeem
+                          ? 'text-purple-600'
+                          : isPositive
+                          ? 'text-emerald-600'
+                          : 'text-rose-600'
                       }`}
                     >
                       {isPositive ? `+${record.points}` : record.points} 點
@@ -379,6 +449,12 @@ function formatRecordTime(raw: string): string {
   } catch {
     return raw;
   }
+}
+
+/** 「兌換30分鐘手機時間」→「30分鐘」；認不出格式就原樣顯示 */
+function shortRedeemLabel(name: string): string {
+  const short = name.replace(/^兌換/, '').replace(/手機時間$/, '').trim();
+  return short || name;
 }
 
 function getCategoryBadgeColor(category: string): string {
