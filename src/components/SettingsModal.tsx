@@ -24,7 +24,7 @@ import {
   Info,
 } from 'lucide-react';
 import { biometricDiagnostics } from '../utils/biometric';
-import { RawSheetResponse, TrustedDevice } from '../types';
+import { RawSheetResponse, RawUser, TrustedDevice } from '../types';
 
 interface Props {
   onClose: () => void;
@@ -162,28 +162,43 @@ export const SettingsModal: React.FC<Props> = ({
     }, 1800);
   };
 
-  const handleResetPasswordToDefault = async () => {
-    if (confirm('確定要清除本機自訂密碼，改用試算表「使用者資料與餘額」中 ADM 的密碼嗎？')) {
-      try {
-        localStorage.removeItem('weekend_points_parent_password');
-      } catch {
-        // ignore
-      }
-      const restored = getParentPassword();
-      if (onPasswordChanged) {
-        onPasswordChanged(restored);
-      }
-      try {
-        await updateParentPasswordInGoogleSheet(restored);
-      } catch {
-        // ignore
-      }
-      setPasswordSuccess(true);
-      setTimeout(() => {
-        setPasswordSuccess(false);
-        setIsChangingPassword(false);
-      }, 1500);
+  /** 試算表裡 ADM 那列目前的密碼；讀不到回 null */
+  const sheetAdminPassword = (() => {
+    const rows = rawResponse?.['使用者資料與餘額'] as RawUser[] | undefined;
+    if (!Array.isArray(rows)) return null;
+    const adm = rows.find((u) => String(u.UserID ?? '').trim().toUpperCase() === 'ADM');
+    if (!adm) return null;
+    const pw = String(adm['密碼'] ?? adm.Password ?? '').trim();
+    return pw === '' ? null : pw;
+  })();
+
+  /**
+   * 「還原試算表原始密碼」＝丟掉本機的自訂密碼，改用試算表現在寫的那組。
+   *
+   * 這裡**絕對不能回寫試算表**。舊版寫成 getParentPassword() 不帶參數，
+   * 在本機 override 剛被清掉的情況下會回傳寫死的預設值，再把那個預設值
+   * 寫進試算表 —— 行為與按鈕文案完全相反，會把家長自訂的密碼蓋掉。
+   */
+  const handleResetPasswordToDefault = () => {
+    if (!sheetAdminPassword) {
+      setPasswordError('讀不到試算表裡的 ADM 密碼，請先重新整理資料再試');
+      return;
     }
+    if (!confirm('確定要清除本機自訂密碼，改用試算表「使用者資料與餘額」中 ADM 的密碼嗎？')) {
+      return;
+    }
+    try {
+      localStorage.removeItem('weekend_points_parent_password');
+    } catch {
+      // ignore
+    }
+    setPasswordError(null);
+    if (onPasswordChanged) onPasswordChanged(sheetAdminPassword);
+    setPasswordSuccess(true);
+    setTimeout(() => {
+      setPasswordSuccess(false);
+      setIsChangingPassword(false);
+    }, 1500);
   };
 
   return (

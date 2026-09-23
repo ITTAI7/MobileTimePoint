@@ -646,9 +646,38 @@ export function formatWeekLabel(range: WeekRange): string {
 }
 
 // Convert points to weekend screen time (default rule based on T05: 10 points = 30 min, meaning 1 point = 3 minutes)
-export function pointsToTime(points: number): { minutes: number; text: string; hours: number; remainingMins: number } {
+/**
+ * 從配分表最便宜的兌換項目推算「1 點 = 幾分鐘」。
+ *
+ * 名稱裡的時間是唯一的來源（例如「兌換30分鐘手機時間」＝ -10 點 → 3 分鐘/點），
+ * 所以家長在試算表調整兌換方案，畫面就會跟著變 —— 這是 note.md 承諾的行為。
+ * 推算不出來（沒有兌換項目、或名稱沒寫時間）才退回 3。
+ */
+export function getMinutesPerPoint(tasks: CleanTask[]): number {
+  const rates = tasks
+    .filter((t) => t.category.includes('兌換') && t.points < 0)
+    .sort((a, b) => Math.abs(a.points) - Math.abs(b.points))
+    .map((t) => {
+      const hourMatch = t.name.match(/(\d+(?:\.\d+)?)\s*小時/);
+      const minMatch = t.name.match(/(\d+)\s*分鐘/);
+      let minutes = 0;
+      if (hourMatch) minutes += Number(hourMatch[1]) * 60;
+      if (minMatch) minutes += Number(minMatch[1]);
+      const cost = Math.abs(t.points);
+      return minutes > 0 && cost > 0 ? minutes / cost : NaN;
+    })
+    .filter((v) => Number.isFinite(v) && v > 0);
+
+  return rates.length > 0 ? rates[0] : 3;
+}
+
+export function pointsToTime(
+  points: number,
+  minutesPerPoint = 3
+): { minutes: number; text: string; hours: number; remainingMins: number } {
   const safePoints = Math.max(0, points);
-  const minutes = safePoints * 3;
+  const rate = Number.isFinite(minutesPerPoint) && minutesPerPoint > 0 ? minutesPerPoint : 3;
+  const minutes = Math.round(safePoints * rate);
   const hours = Math.floor(minutes / 60);
   const remainingMins = minutes % 60;
 

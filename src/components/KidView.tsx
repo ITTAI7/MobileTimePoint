@@ -1,6 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { CleanUser, CleanRecord, CleanTask } from '../types';
-import { pointsToTime, getWeekRange, isInWeek, formatWeekLabel } from '../utils/sheetData';
+import { pointsToTime, getMinutesPerPoint, getWeekRange, isInWeek, formatWeekLabel } from '../utils/sheetData';
 import { 
   Sparkles, 
   Smartphone, 
@@ -47,7 +47,9 @@ export const KidView: React.FC<Props> = ({
     currentPoints: 0,
   };
 
-  const timeInfo = pointsToTime(currentUser.currentPoints);
+  // 匯率跟著配分表走，不寫死 —— 家長改兌換方案，這裡的「可換多久」就跟著變
+  const minutesPerPoint = useMemo(() => getMinutesPerPoint(tasks), [tasks]);
+  const timeInfo = pointsToTime(currentUser.currentPoints, minutesPerPoint);
   const theme = themeOf(currentUser);
 
   // 本週區間（星期日 ~ 星期六）

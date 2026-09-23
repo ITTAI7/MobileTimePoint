@@ -11,6 +11,15 @@ interface Props {
 export const TasksTableModal: React.FC<Props> = ({ tasks, onClose, onSelectTask }) => {
   const categories = Array.from(new Set(tasks.map((t) => t.category)));
 
+  // 匯率直接引用配分表最便宜的兌換項目，不寫死 ——
+  // 家長改了試算表，這行字才不會跟實際規則對不上。
+  const cheapestRedeem = tasks
+    .filter((t) => t.category.includes('兌換') && t.points < 0)
+    .sort((a, b) => Math.abs(a.points) - Math.abs(b.points))[0];
+  const redeemHint = cheapestRedeem
+    ? `${Math.abs(cheapestRedeem.points)} 點 = ${cheapestRedeem.name}`
+    : '配分表裡沒有兌換項目';
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-xs p-4 animate-in fade-in duration-200"
@@ -99,7 +108,7 @@ export const TasksTableModal: React.FC<Props> = ({ tasks, onClose, onSelectTask 
         <div className="p-4 border-t border-slate-100 bg-slate-50 flex items-center justify-between">
           <span className="text-xs text-slate-500 flex items-center gap-1">
             <Smartphone className="w-3.5 h-3.5 text-blue-600" />
-            10 點 = 兌換 30 分鐘手機時間
+            {redeemHint}
           </span>
           <button
             onClick={onClose}

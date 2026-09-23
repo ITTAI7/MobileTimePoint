@@ -415,7 +415,9 @@ export default function App() {
     const prevPoints = userToUpdate ? userToUpdate.currentPoints : 0;
 
     // timestamp 由表單決定（可以補登過去的日期），不是固定用「現在」
-    const logId = `L${Date.now()}`;
+    // 加隨機碼：伺服器會用 LogID 去重（避免重送造成重複計分），
+    // 只有毫秒的話，兩台裝置剛好同時送出就會被誤判成同一筆而靜默丟失。
+    const logId = `L${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
     const pendingRecord: CleanRecord = {
       ...newRecordData,
       id: logId,
