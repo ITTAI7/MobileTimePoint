@@ -1,4 +1,4 @@
-import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord, SheetAudit, RecalcResult } from '../types';
+import { RawSheetResponse, CleanTask, CleanUser, CleanRecord, RawTask, RawUser, RawRecord, SheetAudit, RecalcResult, TrustedDevice } from '../types';
 
 export const DEFAULT_GAS_API_URL = 'https://script.google.com/macros/s/AKfycbz39OiajdWzbMOroIMCtdU_JmtSE5zNq9wnoModKLDEDuzcW3vzquh4Is1GJn1Ucw2P/exec';
 
@@ -321,6 +321,87 @@ export async function recalculateGoogleSheet(dryRun: boolean): Promise<RecalcRes
   }
 }
 
+/** 舊版 Apps Script 不會回傳這個欄位，當作「沒有登記任何裝置」處理 */
+export function parseTrustedDevices(raw: unknown): TrustedDevice[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item) => {
+      const d = (item || {}) as Record<string, unknown>;
+      return {
+        credentialId: String(d.credentialId ?? ''),
+        label: String(d.label ?? '家長裝置'),
+        registeredAt: String(d.registeredAt ?? ''),
+      };
+    })
+    .filter((d) => d.credentialId !== '');
+}
+
+export interface DeviceResult {
+  ok: boolean;
+  devices: TrustedDevice[];
+  code?: string;
+  message?: string;
+}
+
+/**
+ * 登記／移除受信任裝置。
+ *
+ * 兩者都要附上家長密碼由伺服器驗證 —— 否則任何人都能直接打 API
+ * 把兩個名額佔掉，或把你的手機踢掉。
+ *
+ * 這兩個動作都是冪等的（重複登記同一支只會更新標籤），回應遺失時可安全重試。
+ */
+async function deviceAction(
+  action: 'registerDevice' | 'removeDevice',
+  payload: Record<string, unknown>
+): Promise<DeviceResult> {
+  const ATTEMPTS = 3;
+
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
+    try {
+      const response = await fetch(getStoredApiUrl(), {
+        method: 'POST',
+        body: JSON.stringify({ action, ...payload }),
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        redirect: 'follow',
+      });
+
+      const json = JSON.parse(await response.text());
+      const devices = parseTrustedDevices(json.devices);
+
+      if (json.status === 'success') return { ok: true, devices };
+      return {
+        ok: false,
+        devices,
+        code: typeof json.code === 'string' ? json.code : undefined,
+        message: String(json.message || '操作失敗'),
+      };
+    } catch {
+      if (attempt === ATTEMPTS) {
+        return { ok: false, devices: [], message: `連線失敗，已重試 ${ATTEMPTS} 次` };
+      }
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+    }
+  }
+
+  return { ok: false, devices: [], message: '操作失敗' };
+}
+
+export function registerTrustedDevice(
+  credentialId: string,
+  label: string,
+  password: string
+): Promise<DeviceResult> {
+  return deviceAction('registerDevice', { credentialId, label, password });
+}
+
+export function removeTrustedDevice(
+  credentialId: string,
+  password: string
+): Promise<DeviceResult> {
+  return deviceAction('removeDevice', { credentialId, password });
+}
+
 /**
  * @param fresh 略過伺服器端快取，強制重讀試算表。
  *              平常開啟用快取（快很多）；按下重新整理、或需要確認剛才的寫入時才用 true。
@@ -330,6 +411,8 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
   users: CleanUser[];
   records: CleanRecord[];
   audit: SheetAudit | null;
+  trustedDevices: TrustedDevice[];
+  maxTrustedDevices: number;
   raw: RawSheetResponse;
 }> {
   const base = customUrl || getStoredApiUrl();
@@ -375,7 +458,16 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
     users
   );
 
-  return { tasks, users, records, audit: parseAudit(data.audit), raw: data };
+  return {
+    tasks,
+    users,
+    records,
+    audit: parseAudit(data.audit),
+    trustedDevices: parseTrustedDevices(data.trustedDevices),
+    // 伺服器沒回報時退回 2，與後端的 MAX_TRUSTED_DEVICES 一致
+    maxTrustedDevices: Number(data.maxTrustedDevices) || 2,
+    raw: data,
+  };
 }
 
 // Local Storage helpers for seamless offline and instant updates

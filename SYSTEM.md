@@ -145,9 +145,13 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
   "weekStart": "2026-09-19T16:00:00.000Z",
   "weekEnd":   "2026-09-26T16:00:00.000Z",
   "logsTotal": 11,
+  "trustedDevices": [ { "credentialId": "...", "label": "爸爸的手機", "registeredAt": "..." } ],
+  "maxTrustedDevices": 2,
   "timestamp": "..."
 }
 ```
+
+`trustedDevices` 存在 **ScriptProperties**（不在試算表裡），所以清空試算表不會影響它。
 
 ### 寫入
 
@@ -160,9 +164,13 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
 | `addTask` | 新增任務項目，編號由伺服器接續產生 | **否** |
 | `updateLog` | 依 `logId` 修改既有紀錄的 `timestamp` / `taskName` / `note` | 是 |
 | `updatePassword` | 更新 ADM 的密碼 | 是 |
+| `recalculate` | 以存摺為準重算所有餘額，可帶 `dryRun` | 是 |
+| `registerDevice` | 登記一支受信任裝置（需 `password`、`credentialId`、`label`） | 是 |
+| `removeDevice` | 移除受信任裝置（需 `password`、`credentialId`） | 是 |
 
 回應一律是 `{"status": "success"|"error", ...}`。錯誤時可能帶 `code`：
-`INSUFFICIENT_POINTS`（兌換透支）、`LOG_NOT_FOUND`、`BUSY`（拿不到寫入鎖）。
+`INSUFFICIENT_POINTS`（兌換透支）、`LOG_NOT_FOUND`、`BUSY`（拿不到寫入鎖）、
+`BAD_PASSWORD`（裝置操作的密碼不符）、`DEVICE_LIMIT`（受信任裝置已達 2 支）。
 
 ### 呼叫時的兩個陷阱
 
@@ -190,6 +198,9 @@ curl -sk -L --data-binary @payload.json \
 - **扣分可累計負分**，不受上述限制（刻意的設計）。
 - **餘額由伺服器計算**（讀試算表現值 + 異動量），不採用前端送來的 `newBalance`。
 - **所有寫入包在 `LockService` 內**，確保「讀現值 → 判斷 → 寫回」不可分割。
+- **裝置登記／移除一律在伺服器驗家長密碼**，空密碼直接拒絕。否則任何人直接打 API 就能佔滿兩個名額，或把家長的手機踢掉。
+- **名額上限由伺服器把關**（`MAX_TRUSTED_DEVICES = 2`）；重複登記同一個 `credentialId` 只更新名稱，不佔用新名額。
+- 兩支裝置都遺失時，在 Apps Script 編輯器執行 `resetTrustedDevices()` 清空名單。密碼登入不受影響，不會被鎖在外面。
 
 ---
 
@@ -201,6 +212,7 @@ curl -sk -L --data-binary @payload.json \
 | doGet 輸出 key | Apps Script 的 `OUTPUT_KEYS` | **必須維持 `積分明細/點數存摺`**，前端讀這個名稱。與試算表分頁實際叫什麼無關 |
 | 試算表分頁名 | Apps Script 的 `SHEET_NAMES` | 分頁改名只需改這裡。目前容許 `點數存摺` / `積分明細/點數存摺` 兩種 |
 | 試算表欄位名 | 兩邊都有 | 前端 `parseClean*` 與後端 `findCol_` 都靠欄位名比對 |
+| 受信任裝置 | 後端 ScriptProperties `trusted_devices_v1` | 前端以 `credentialId` 比對。**本機憑證必須同時在伺服器名單上才算受信任** —— 只看 localStorage 的話，偽造一筆就能繞過 |
 | 週的定義 | 前後端各一份 | 前端 `getWeekRange()`、後端 `weekRange_()`，皆為「週日 00:00 起、下週日 00:00 止」，邏輯必須一致 |
 
 **時區**：Apps Script 專案時區必須與試算表時區相同（目前為 `Asia/Taipei`），否則週的分界會偏移數小時。
@@ -226,7 +238,8 @@ curl -sk -L --data-binary @payload.json \
 | `vite.config.ts` 使用 `__dirname` | 目前只是警告，未來 Vite 版本會不支援 | 改用 `import.meta.dirname` |
 | 倉庫未納入 lock 檔 | 不同時間安裝可能取得不同的相依版本 | 若需可重現的建置，在部署環境提交該環境產生的 lock 檔 |
 | 家長密碼僅前端驗證 | 明碼寫在 bundle 與試算表，開 DevTools 即可看到 | 定位是「防小孩誤按」，**不是安全機制**。不要用它保護真正敏感的東西 |
-| 寫入失敗時的網路錯誤會走 `no-cors` 後備 | 該路徑讀不到回應，無法判斷成功與否 | 目前一律視為成功；靠使用者重新整理核對 |
+| 寫入失敗時的網路錯誤會走 `no-cors` 後備 | 該路徑讀不到回應，無法判斷成功與否 | 標為 `confirmed: false`，前端改去試算表核對該筆 `logId` 是否存在，不直接當成功 |
+| 指紋解鎖不做密碼學驗證 | WebAuthn 的簽章沒有送回伺服器檢查，開 DevTools 可繞過 | 與密碼同級的「防小孩」機制。名額上限與名單本身是伺服器把關的，那部分繞不過 |
 | 補登過去日期的紀錄需直接呼叫 API | App 介面只能記錄「當下」時間 | 若常用，可在家長操作區加日期選擇器 |
 
 ---
@@ -235,13 +248,14 @@ curl -sk -L --data-binary @payload.json \
 
 ```
 src/
-  App.tsx                    狀態容器：載入資料、樂觀更新與失敗回滾、密碼鎖
+  App.tsx                    狀態容器：載入資料、確認寫入後才更新、密碼鎖與裝置名單
   types.ts                   試算表原始欄位 → 乾淨型別的對應
   utils/sheetData.ts         資料層：API 讀寫、欄位容錯解析、週區間、localStorage 快取
+  utils/biometric.ts         WebAuthn 平台驗證器：註冊／驗證指紋，錯誤訊息中文化
   components/
     KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細
     ParentView.tsx           家長操作區：分類選單、加扣分、兌換透支檢查
-    SettingsModal.tsx        API 網址設定、原始回應檢視、清除本機快取
+    SettingsModal.tsx        API 網址設定、家長裝置名單、原始回應檢視、清除本機快取
     TasksTableModal.tsx      配分表檢視
     ParentPasswordModal.tsx / ChangePasswordModal.tsx
     PWAInstallButton.tsx

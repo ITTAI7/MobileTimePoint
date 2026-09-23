@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
-import { Lock, Eye, EyeOff, X, ShieldAlert, Check } from 'lucide-react';
+import { Lock, Eye, EyeOff, X, ShieldAlert, Check, Fingerprint } from 'lucide-react';
 
 interface Props {
   /** 驗證交給 App —— 這個元件不需要知道密碼本身 */
   onVerify: (password: string) => Promise<boolean>;
   /** 既沒有本機雜湊、資料也還沒同步，此時無從驗證 */
   isSyncing?: boolean;
+  /** 這台裝置已登記指紋時才會傳入；回 true 代表驗證通過 */
+  onBiometric?: () => Promise<{ ok: boolean; message?: string }>;
   onSuccess: () => void;
   onClose: () => void;
 }
@@ -13,6 +15,7 @@ interface Props {
 export const ParentPasswordModal: React.FC<Props> = ({
   onVerify,
   isSyncing = false,
+  onBiometric,
   onSuccess,
   onClose,
 }) => {
@@ -20,6 +23,17 @@ export const ParentPasswordModal: React.FC<Props> = ({
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [bioError, setBioError] = useState<string | null>(null);
+
+  const handleBiometric = async () => {
+    if (!onBiometric || checking) return;
+    setBioError(null);
+    setChecking(true);
+    const res = await onBiometric();
+    setChecking(false);
+    if (res.ok) onSuccess();
+    else setBioError(res.message || '指紋驗證失敗');
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -64,17 +78,47 @@ export const ParentPasswordModal: React.FC<Props> = ({
           </button>
         </div>
 
+        {/* 已登記的裝置優先走指紋，密碼退居備援 */}
+        {onBiometric && (
+          <div className="mt-4 space-y-2">
+            <button
+              type="button"
+              onClick={handleBiometric}
+              disabled={checking}
+              className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-sm font-bold shadow-md shadow-orange-500/20 active:scale-98 transition flex items-center justify-center gap-2 disabled:opacity-50 disabled:active:scale-100"
+            >
+              <Fingerprint className="w-5 h-5" />
+              <span>{checking ? '驗證中…' : '用指紋解鎖'}</span>
+            </button>
+
+            {bioError && (
+              <p className="text-xs text-rose-600 flex items-center gap-1 animate-in fade-in">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
+                {bioError}
+              </p>
+            )}
+
+            <div className="flex items-center gap-2 pt-1">
+              <div className="flex-1 h-px bg-slate-200" />
+              <span className="text-[11px] text-slate-400">或輸入密碼</span>
+              <div className="flex-1 h-px bg-slate-200" />
+            </div>
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="mt-4 space-y-4">
-          <p className="text-xs text-slate-600 leading-relaxed">
-            請輸入 Google Sheet「使用者資料」中 ADM 家長密碼，防止小孩自行增加積分或調整項目。
-          </p>
+          {!onBiometric && (
+            <p className="text-xs text-slate-600 leading-relaxed">
+              請輸入 Google Sheet「使用者資料」中 ADM 家長密碼，防止小孩自行增加積分或調整項目。
+            </p>
+          )}
 
           <div className="space-y-1.5">
             <label className="block text-xs font-semibold text-slate-700">家長密碼</label>
             <div className="relative">
               <input
                 type={showPassword ? 'text' : 'password'}
-                autoFocus
+                autoFocus={!onBiometric}
                 placeholder="請輸入密碼"
                 value={password}
                 onChange={(e) => {

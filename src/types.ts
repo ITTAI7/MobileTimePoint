@@ -112,6 +112,13 @@ export interface RecalcResult {
   message?: string;
 }
 
+/** 可以進入家長區的受信任裝置（最多兩支） */
+export interface TrustedDevice {
+  credentialId: string;
+  label: string;
+  registeredAt: string;
+}
+
 export interface CleanTask {
   id: string;
   category: string;

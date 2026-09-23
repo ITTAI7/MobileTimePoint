@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react';
-import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit, RecalcResult } from './types';
+import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit, RecalcResult, TrustedDevice } from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -18,6 +18,8 @@ import {
   writeRecordToGoogleSheet,
   addNewTaskToGoogleSheet,
   recalculateGoogleSheet,
+  registerTrustedDevice,
+  removeTrustedDevice,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -28,6 +30,13 @@ import { TasksTableModal } from './components/TasksTableModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
+import {
+  isBiometricAvailable,
+  registerBiometric,
+  verifyBiometric,
+  getStoredCredentialId,
+  clearStoredCredential,
+} from './utils/biometric';
 import { 
   Smartphone, 
   RefreshCw, 
@@ -38,7 +47,8 @@ import {
   Lock,
   Unlock,
   ShieldCheck,
-  Sparkles
+  Sparkles,
+  Fingerprint
 } from 'lucide-react';
 
 export default function App() {
@@ -92,6 +102,65 @@ export default function App() {
   // 密碼的本機雜湊，讓解鎖不必等連線
   const [passwordHash, setPasswordHash] = useState<string | null>(() => getCachedPasswordHash());
 
+  /* ─── 受信任裝置（指紋解鎖）─── */
+  const [trustedDevices, setTrustedDevices] = useState<TrustedDevice[]>([]);
+  const [maxTrustedDevices, setMaxTrustedDevices] = useState(2);
+  const [bioAvailable, setBioAvailable] = useState(false);
+  const [localCredentialId, setLocalCredentialId] = useState<string | null>(() =>
+    getStoredCredentialId()
+  );
+
+  useEffect(() => {
+    isBiometricAvailable().then(setBioAvailable);
+  }, []);
+
+  // 本機憑證同時要在伺服器名單上才算數 ——
+  // 只看本機的話，把 localStorage 塞一筆假的就能繞過。
+  const isThisDeviceTrusted =
+    localCredentialId !== null &&
+    trustedDevices.some((d) => d.credentialId === localCredentialId);
+
+  const deviceSlotsLeft = Math.max(0, maxTrustedDevices - trustedDevices.length);
+
+  /** 解鎖後才會呼叫：把這台裝置登記成受信任裝置 */
+  const enrollThisDevice = async (
+    label: string,
+    password: string
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const bio = await registerBiometric(label);
+    if (!bio.ok) return { ok: false, message: bio.message };
+
+    const credentialId = getStoredCredentialId();
+    if (!credentialId) return { ok: false, message: '沒有取得憑證識別碼' };
+
+    const res = await registerTrustedDevice(credentialId, label, password);
+    if (!res.ok) {
+      // 伺服器不收（例如名額滿了）就把本機憑證清掉，避免本機以為自己已登記
+      clearStoredCredential();
+      setLocalCredentialId(null);
+      return { ok: false, message: res.message };
+    }
+
+    setTrustedDevices(res.devices);
+    setLocalCredentialId(credentialId);
+    return { ok: true };
+  };
+
+  const revokeDevice = async (
+    credentialId: string,
+    password: string
+  ): Promise<{ ok: boolean; message?: string }> => {
+    const res = await removeTrustedDevice(credentialId, password);
+    if (!res.ok) return { ok: false, message: res.message };
+
+    setTrustedDevices(res.devices);
+    if (credentialId === localCredentialId) {
+      clearStoredCredential();
+      setLocalCredentialId(null);
+    }
+    return { ok: true };
+  };
+
   // 只在資料確實同步過之後才存雜湊 ——
   // 否則連線失敗時 effectivePassword 會是內建預設值，存下去就把錯的密碼記起來了。
   useEffect(() => {
@@ -115,11 +184,16 @@ export default function App() {
     const candidate = input.trim();
     if (!candidate) return false;
 
-    if (hasFreshData) return candidate === effectivePassword.trim();
+    const remember = (ok: boolean) => {
+      if (ok) setUnlockedWithPassword(candidate);
+      return ok;
+    };
+
+    if (hasFreshData) return remember(candidate === effectivePassword.trim());
 
     if (passwordHash) {
       const h = await hashPassword(candidate);
-      return h !== null && h === passwordHash;
+      return remember(h !== null && h === passwordHash);
     }
     return false;
   };
@@ -140,6 +214,8 @@ export default function App() {
       const data = await fetchSheetData(fresh);
       setRawResponse(data.raw);
       setAudit(data.audit);
+      setTrustedDevices(data.trustedDevices);
+      setMaxTrustedDevices(data.maxTrustedDevices);
 
       // Tasks
       if (data.tasks.length > 0) {
@@ -230,15 +306,47 @@ export default function App() {
     }
   };
 
+  // 剛驗證過的密碼：登記裝置時伺服器要再驗一次，暫存在記憶體（不落地）
+  const [unlockedWithPassword, setUnlockedWithPassword] = useState<string | null>(null);
+  const [showEnrollPrompt, setShowEnrollPrompt] = useState(false);
+  const [enrollLabel, setEnrollLabel] = useState('');
+  const [enrollBusy, setEnrollBusy] = useState(false);
+  const [enrollError, setEnrollError] = useState<string | null>(null);
+
+  const handleEnroll = async () => {
+    if (!unlockedWithPassword) return;
+    setEnrollBusy(true);
+    setEnrollError(null);
+    const res = await enrollThisDevice(enrollLabel.trim() || '家長裝置', unlockedWithPassword);
+    setEnrollBusy(false);
+    if (res.ok) {
+      setShowEnrollPrompt(false);
+      setEnrollLabel('');
+    } else {
+      setEnrollError(res.message || '登記失敗');
+    }
+  };
+
   const handlePasswordSuccess = () => {
     setIsParentUnlocked(true);
     setShowPasswordModal(false);
     setActiveTab('parent');
+
+    // 還有名額、這台又沒登記過、而且裝置支援指紋 —— 才問要不要設為家長裝置
+    if (deviceSlotsLeft > 0 && !isThisDeviceTrusted && bioAvailable && unlockedWithPassword) {
+      setShowEnrollPrompt(true);
+    }
+  };
+
+  const handleLockAndForget = () => {
+    setUnlockedWithPassword(null);
+    setShowEnrollPrompt(false);
   };
 
   const handleLockParentMode = () => {
     setIsParentUnlocked(false);
     setActiveTab('kid');
+    handleLockAndForget();
   };
 
   // Handle Parent Submitting a Point Adjustment Record
@@ -646,7 +754,52 @@ export default function App() {
             isRefreshing={isRefreshing}
           />
         ) : (
-          <ParentView
+          <>
+            {/* 解鎖後提示：把這台設為家長裝置，之後用指紋就能進來 */}
+            {showEnrollPrompt && (
+              <div className="mb-4 p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900">
+                <div className="flex items-center gap-2">
+                  <Fingerprint className="w-5 h-5 text-amber-600 shrink-0" />
+                  <p className="font-bold text-sm">要把這支手機設為家長裝置嗎？</p>
+                </div>
+                <p className="text-xs text-amber-800 mt-1.5 leading-relaxed">
+                  設定後，這支手機用指紋就能直接進家長區，不用再打密碼。
+                  最多只能登記 {maxTrustedDevices} 支，目前還剩 <strong>{deviceSlotsLeft}</strong> 個名額。
+                </p>
+
+                <input
+                  type="text"
+                  value={enrollLabel}
+                  onChange={(e) => setEnrollLabel(e.target.value)}
+                  placeholder="幫這支手機取名，例如：爸爸的手機"
+                  maxLength={30}
+                  className="mt-2.5 w-full px-3 py-2 rounded-xl bg-white border border-amber-200 text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                />
+
+                {enrollError && (
+                  <p className="mt-2 text-xs text-rose-700 font-medium">{enrollError}</p>
+                )}
+
+                <div className="flex gap-2 mt-3">
+                  <button
+                    onClick={handleEnroll}
+                    disabled={enrollBusy}
+                    className="flex-1 py-2 rounded-xl bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 active:scale-98 transition disabled:opacity-50"
+                  >
+                    {enrollBusy ? '登記中…' : '設為家長裝置'}
+                  </button>
+                  <button
+                    onClick={() => setShowEnrollPrompt(false)}
+                    disabled={enrollBusy}
+                    className="px-3 py-2 rounded-xl bg-white border border-amber-300 text-amber-800 text-xs font-medium hover:bg-amber-50 transition disabled:opacity-50"
+                  >
+                    這次不要
+                  </button>
+                </div>
+              </div>
+            )}
+
+            <ParentView
             users={users}
             tasks={tasks}
             selectedUserId={selectedUserId}
@@ -654,7 +807,8 @@ export default function App() {
             onSubmitRecord={handleParentSubmitRecord}
             onAddTask={handleAddTask}
             isWritingToSheet={isWritingToSheet}
-          />
+            />
+          </>
         )}
       </main>
 
@@ -683,6 +837,8 @@ export default function App() {
           onVerify={verifyParentPassword}
           // 有本機雜湊就能立刻驗證；兩者皆無時才需要等連線
           isSyncing={!hasFreshData && !passwordHash}
+          // 只有「本機有憑證且伺服器名單也有」才給指紋，避免偽造 localStorage 繞過
+          onBiometric={isThisDeviceTrusted ? verifyBiometric : undefined}
           onSuccess={handlePasswordSuccess}
           onClose={() => setShowPasswordModal(false)}
         />
@@ -700,6 +856,11 @@ export default function App() {
       {showSettingsModal && (
         <SettingsModal
           onClose={() => setShowSettingsModal(false)}
+          trustedDevices={trustedDevices}
+          maxTrustedDevices={maxTrustedDevices}
+          localCredentialId={localCredentialId}
+          // 只有已解鎖家長區時才給裝置管理 —— 小孩點設定看不到這一區
+          onRemoveDevice={isParentUnlocked ? revokeDevice : undefined}
           onRefreshData={() => loadData(true)}
           onResetLocalData={handleResetLocalData}
           rawResponse={rawResponse}

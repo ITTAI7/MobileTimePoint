@@ -21,10 +21,15 @@ import {
   RotateCcw,
   Loader2,
 } from 'lucide-react';
-import { RawSheetResponse } from '../types';
+import { RawSheetResponse, TrustedDevice } from '../types';
 
 interface Props {
   onClose: () => void;
+  /** 可進入家長區的裝置名單，以及移除的方式 */
+  trustedDevices?: TrustedDevice[];
+  maxTrustedDevices?: number;
+  localCredentialId?: string | null;
+  onRemoveDevice?: (credentialId: string, password: string) => Promise<{ ok: boolean; message?: string }>;
   onRefreshData: () => void;
   onResetLocalData: () => void;
   rawResponse?: RawSheetResponse | null;
@@ -34,6 +39,10 @@ interface Props {
 
 export const SettingsModal: React.FC<Props> = ({
   onClose,
+  trustedDevices = [],
+  maxTrustedDevices = 2,
+  localCredentialId = null,
+  onRemoveDevice,
   onRefreshData,
   onResetLocalData,
   rawResponse,
@@ -51,6 +60,8 @@ export const SettingsModal: React.FC<Props> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [passwordError, setPasswordError] = useState<string | null>(null);
   const [passwordSuccess, setPasswordSuccess] = useState(false);
+  const [deviceBusy, setDeviceBusy] = useState(false);
+  const [deviceError, setDeviceError] = useState<string | null>(null);
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
 
   const hasCustomPassword = Boolean(localStorage.getItem('weekend_points_parent_password'));
@@ -374,6 +385,75 @@ export const SettingsModal: React.FC<Props> = ({
               )}
             </div>
           </div>
+
+          {/* 受信任裝置：只有這些裝置能用指紋直接進家長區 */}
+          {onRemoveDevice && (
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                  家長裝置（指紋解鎖）
+                </h4>
+                <span className="text-[11px] text-slate-400 font-mono">
+                  {trustedDevices.length} / {maxTrustedDevices}
+                </span>
+              </div>
+
+              {trustedDevices.length === 0 ? (
+                <p className="text-[11px] text-slate-400 leading-relaxed">
+                  還沒有登記任何裝置。在手機上用密碼進入家長區後，會出現「設為家長裝置」的提示。
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {trustedDevices.map((d) => {
+                    const isThis = d.credentialId === localCredentialId;
+                    return (
+                      <div
+                        key={d.credentialId}
+                        className="flex items-center justify-between p-3 rounded-2xl bg-slate-50 border border-slate-200 gap-3"
+                      >
+                        <div className="min-w-0">
+                          <p className="font-medium text-slate-800 text-xs truncate">
+                            {d.label}
+                            {isThis && (
+                              <span className="ml-1.5 text-[10px] bg-emerald-100 text-emerald-700 px-1.5 py-0.5 rounded font-normal">
+                                這台
+                              </span>
+                            )}
+                          </p>
+                          <p className="text-[11px] text-slate-400">
+                            {d.registeredAt ? new Date(d.registeredAt).toLocaleDateString() : ''} 登記
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={deviceBusy}
+                          onClick={async () => {
+                            const pass = prompt(`移除「${d.label}」需要家長密碼：`);
+                            if (!pass) return;
+                            setDeviceBusy(true);
+                            setDeviceError(null);
+                            const res = await onRemoveDevice(d.credentialId, pass);
+                            setDeviceBusy(false);
+                            if (!res.ok) setDeviceError(res.message || '移除失敗');
+                          }}
+                          className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-medium transition shrink-0 disabled:opacity-50"
+                        >
+                          移除
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {deviceError && <p className="text-[11px] text-rose-600">{deviceError}</p>}
+
+              <p className="text-[11px] text-slate-400 leading-relaxed">
+                只有登記過的裝置能用指紋解鎖。其他裝置仍可用密碼進入 ——
+                這是換手機或忘記帶手機時的退路。
+              </p>
+            </div>
+          )}
 
           {/* Section 3: Data Reset Section */}
           <div className="pt-4 border-t border-slate-100 space-y-3">
