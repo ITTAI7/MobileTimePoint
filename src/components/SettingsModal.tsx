@@ -20,7 +20,10 @@ import {
   ShieldAlert,
   RotateCcw,
   Loader2,
+  Fingerprint,
+  Info,
 } from 'lucide-react';
+import { biometricDiagnostics } from '../utils/biometric';
 import { RawSheetResponse, TrustedDevice } from '../types';
 
 interface Props {
@@ -30,6 +33,11 @@ interface Props {
   maxTrustedDevices?: number;
   localCredentialId?: string | null;
   onRemoveDevice?: (credentialId: string, password: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 只有「還有名額、這台沒登記過、裝置支援指紋」時 App 才會傳進來 */
+  onEnrollDevice?: (label: string) => Promise<{ ok: boolean; message?: string }>;
+  /** 這台裝置本身支援不支援指紋（用來解釋為什麼沒有登記按鈕） */
+  bioAvailable?: boolean;
+  isThisDeviceTrusted?: boolean;
   onRefreshData: () => void;
   onResetLocalData: () => void;
   rawResponse?: RawSheetResponse | null;
@@ -43,6 +51,9 @@ export const SettingsModal: React.FC<Props> = ({
   maxTrustedDevices = 2,
   localCredentialId = null,
   onRemoveDevice,
+  onEnrollDevice,
+  bioAvailable = false,
+  isThisDeviceTrusted = false,
   onRefreshData,
   onResetLocalData,
   rawResponse,
@@ -62,6 +73,20 @@ export const SettingsModal: React.FC<Props> = ({
   const [passwordSuccess, setPasswordSuccess] = useState(false);
   const [deviceBusy, setDeviceBusy] = useState(false);
   const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [enrollLabel, setEnrollLabel] = useState('');
+  const [diagnostics, setDiagnostics] = useState<string[] | null>(null);
+
+  const deviceSlotsLeft = Math.max(0, maxTrustedDevices - trustedDevices.length);
+
+  const handleEnroll = async () => {
+    if (!onEnrollDevice || deviceBusy) return;
+    setDeviceBusy(true);
+    setDeviceError(null);
+    const res = await onEnrollDevice(enrollLabel.trim() || '家長裝置');
+    setDeviceBusy(false);
+    if (res.ok) setEnrollLabel('');
+    else setDeviceError(res.message || '登記失敗');
+  };
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
 
   const hasCustomPassword = Boolean(localStorage.getItem('weekend_points_parent_password'));
@@ -400,7 +425,7 @@ export const SettingsModal: React.FC<Props> = ({
 
               {trustedDevices.length === 0 ? (
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  還沒有登記任何裝置。在手機上用密碼進入家長區後，會出現「設為家長裝置」的提示。
+                  還沒有登記任何裝置。登記過的手機，點家長區就能直接用指紋進來。
                 </p>
               ) : (
                 <div className="space-y-2">
@@ -428,21 +453,83 @@ export const SettingsModal: React.FC<Props> = ({
                           type="button"
                           disabled={deviceBusy}
                           onClick={async () => {
-                            const pass = prompt(`移除「${d.label}」需要家長密碼：`);
+                            const pass = prompt(`解除「${d.label}」的授權需要家長密碼：`);
                             if (!pass) return;
                             setDeviceBusy(true);
                             setDeviceError(null);
                             const res = await onRemoveDevice(d.credentialId, pass);
                             setDeviceBusy(false);
-                            if (!res.ok) setDeviceError(res.message || '移除失敗');
+                            if (!res.ok) setDeviceError(res.message || '解除授權失敗');
                           }}
                           className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-medium transition shrink-0 disabled:opacity-50"
                         >
-                          移除
+                          解除授權
                         </button>
                       </div>
                     );
                   })}
+                </div>
+              )}
+
+              {/* 登記這一台 —— 沒名額、已登記、或裝置不支援時都不顯示按鈕 */}
+              {isThisDeviceTrusted ? (
+                <p className="text-[11px] text-emerald-700 flex items-start gap-1.5 leading-relaxed">
+                  <ShieldCheck className="w-3.5 h-3.5 shrink-0 mt-px" />
+                  這台已經授權，點家長區就能直接用指紋。要取消請按上面的「解除授權」。
+                </p>
+              ) : deviceSlotsLeft === 0 ? (
+                <p className="text-[11px] text-slate-500 flex items-start gap-1.5 leading-relaxed">
+                  <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+                  名額已滿（{maxTrustedDevices} 支）。要換成這一台的話，請先解除上面其中一支的授權。
+                </p>
+              ) : onEnrollDevice && bioAvailable ? (
+                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 space-y-2">
+                  <p className="text-[11px] text-amber-900 leading-relaxed">
+                    把<strong>這一台</strong>設為家長裝置，之後用指紋就能進家長區，不用再打密碼。
+                    還剩 <strong>{deviceSlotsLeft}</strong> 個名額。
+                  </p>
+                  <input
+                    type="text"
+                    value={enrollLabel}
+                    onChange={(e) => setEnrollLabel(e.target.value)}
+                    placeholder="幫這台取名，例如：爸爸的手機"
+                    maxLength={30}
+                    className="w-full px-3 py-2 rounded-xl bg-white border border-amber-200 text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleEnroll}
+                    disabled={deviceBusy}
+                    className="w-full py-2 rounded-xl bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 active:scale-98 transition disabled:opacity-50 flex items-center justify-center gap-1.5"
+                  >
+                    <Fingerprint className="w-4 h-4" />
+                    {deviceBusy ? '登記中…' : '把這台設為家長裝置'}
+                  </button>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-slate-500 flex items-start gap-1.5 leading-relaxed">
+                    <Info className="w-3.5 h-3.5 shrink-0 mt-px" />
+                    {onEnrollDevice
+                      ? '這台裝置無法使用指紋登記。'
+                      : '要登記這一台，請先用密碼進入家長區。'}
+                  </p>
+                  {onEnrollDevice && (
+                    <button
+                      type="button"
+                      onClick={async () => setDiagnostics(await biometricDiagnostics())}
+                      className="text-[11px] text-blue-600 hover:underline"
+                    >
+                      看看是哪裡不行
+                    </button>
+                  )}
+                  {diagnostics && (
+                    <ul className="text-[11px] text-slate-500 font-mono bg-slate-50 rounded-xl p-2.5 space-y-0.5">
+                      {diagnostics.map((line) => (
+                        <li key={line}>{line}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               )}
 

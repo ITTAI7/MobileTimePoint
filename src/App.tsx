@@ -47,8 +47,7 @@ import {
   Lock,
   Unlock,
   ShieldCheck,
-  Sparkles,
-  Fingerprint
+  Sparkles
 } from 'lucide-react';
 
 export default function App() {
@@ -119,8 +118,6 @@ export default function App() {
   const isThisDeviceTrusted =
     localCredentialId !== null &&
     trustedDevices.some((d) => d.credentialId === localCredentialId);
-
-  const deviceSlotsLeft = Math.max(0, maxTrustedDevices - trustedDevices.length);
 
   /** 解鎖後才會呼叫：把這台裝置登記成受信任裝置 */
   const enrollThisDevice = async (
@@ -308,39 +305,22 @@ export default function App() {
 
   // 剛驗證過的密碼：登記裝置時伺服器要再驗一次，暫存在記憶體（不落地）
   const [unlockedWithPassword, setUnlockedWithPassword] = useState<string | null>(null);
-  const [showEnrollPrompt, setShowEnrollPrompt] = useState(false);
-  const [enrollLabel, setEnrollLabel] = useState('');
-  const [enrollBusy, setEnrollBusy] = useState(false);
-  const [enrollError, setEnrollError] = useState<string | null>(null);
 
-  const handleEnroll = async () => {
-    if (!unlockedWithPassword) return;
-    setEnrollBusy(true);
-    setEnrollError(null);
-    const res = await enrollThisDevice(enrollLabel.trim() || '家長裝置', unlockedWithPassword);
-    setEnrollBusy(false);
-    if (res.ok) {
-      setShowEnrollPrompt(false);
-      setEnrollLabel('');
-    } else {
-      setEnrollError(res.message || '登記失敗');
-    }
+  /** 設定面板用：登記這一台。密碼取自剛才解鎖時暫存在記憶體的那組。 */
+  const handleEnrollFromSettings = async (label: string) => {
+    if (!unlockedWithPassword) return { ok: false, message: '請先用密碼進入家長區' };
+    return enrollThisDevice(label, unlockedWithPassword);
   };
 
   const handlePasswordSuccess = () => {
     setIsParentUnlocked(true);
     setShowPasswordModal(false);
     setActiveTab('parent');
-
-    // 還有名額、這台又沒登記過、而且裝置支援指紋 —— 才問要不要設為家長裝置
-    if (deviceSlotsLeft > 0 && !isThisDeviceTrusted && bioAvailable && unlockedWithPassword) {
-      setShowEnrollPrompt(true);
-    }
+    // 登記裝置改在「設定 → 家長裝置」裡做，不在這裡打斷流程
   };
 
   const handleLockAndForget = () => {
     setUnlockedWithPassword(null);
-    setShowEnrollPrompt(false);
   };
 
   const handleLockParentMode = () => {
@@ -755,49 +735,6 @@ export default function App() {
           />
         ) : (
           <>
-            {/* 解鎖後提示：把這台設為家長裝置，之後用指紋就能進來 */}
-            {showEnrollPrompt && (
-              <div className="mb-4 p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900">
-                <div className="flex items-center gap-2">
-                  <Fingerprint className="w-5 h-5 text-amber-600 shrink-0" />
-                  <p className="font-bold text-sm">要把這支手機設為家長裝置嗎？</p>
-                </div>
-                <p className="text-xs text-amber-800 mt-1.5 leading-relaxed">
-                  設定後，這支手機用指紋就能直接進家長區，不用再打密碼。
-                  最多只能登記 {maxTrustedDevices} 支，目前還剩 <strong>{deviceSlotsLeft}</strong> 個名額。
-                </p>
-
-                <input
-                  type="text"
-                  value={enrollLabel}
-                  onChange={(e) => setEnrollLabel(e.target.value)}
-                  placeholder="幫這支手機取名，例如：爸爸的手機"
-                  maxLength={30}
-                  className="mt-2.5 w-full px-3 py-2 rounded-xl bg-white border border-amber-200 text-slate-800 text-xs focus:ring-2 focus:ring-amber-500 focus:outline-none"
-                />
-
-                {enrollError && (
-                  <p className="mt-2 text-xs text-rose-700 font-medium">{enrollError}</p>
-                )}
-
-                <div className="flex gap-2 mt-3">
-                  <button
-                    onClick={handleEnroll}
-                    disabled={enrollBusy}
-                    className="flex-1 py-2 rounded-xl bg-amber-600 text-white text-xs font-bold hover:bg-amber-700 active:scale-98 transition disabled:opacity-50"
-                  >
-                    {enrollBusy ? '登記中…' : '設為家長裝置'}
-                  </button>
-                  <button
-                    onClick={() => setShowEnrollPrompt(false)}
-                    disabled={enrollBusy}
-                    className="px-3 py-2 rounded-xl bg-white border border-amber-300 text-amber-800 text-xs font-medium hover:bg-amber-50 transition disabled:opacity-50"
-                  >
-                    這次不要
-                  </button>
-                </div>
-              </div>
-            )}
 
             <ParentView
             users={users}
@@ -861,6 +798,11 @@ export default function App() {
           localCredentialId={localCredentialId}
           // 只有已解鎖家長區時才給裝置管理 —— 小孩點設定看不到這一區
           onRemoveDevice={isParentUnlocked ? revokeDevice : undefined}
+          onEnrollDevice={
+            isParentUnlocked && unlockedWithPassword ? handleEnrollFromSettings : undefined
+          }
+          bioAvailable={bioAvailable}
+          isThisDeviceTrusted={isThisDeviceTrusted}
           onRefreshData={() => loadData(true)}
           onResetLocalData={handleResetLocalData}
           rawResponse={rawResponse}
