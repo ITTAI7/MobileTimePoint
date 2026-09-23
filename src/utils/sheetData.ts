@@ -515,6 +515,7 @@ export function saveLocalUsersOverride(map: Record<string, number>) {
 
 const STORAGE_KEY_TASKS_CACHE = 'weekend_points_cache_tasks_v1';
 const STORAGE_KEY_USERS_CACHE = 'weekend_points_cache_users_v1';
+const STORAGE_KEY_DEVICES_CACHE = 'weekend_points_cache_devices_v1';
 
 export function saveCachedTasks(tasks: CleanTask[]) {
   try {
@@ -558,9 +559,40 @@ export function getCachedUsers(): CleanUser[] | null {
   }
 }
 
+/**
+ * 快取受信任裝置名單。
+ *
+ * 不快取的話，開 App 的前 2~3 秒（以及整個離線期間）名單都是空的，
+ * 指紋按鈕就不會出現 —— 等於這個功能在最需要的時候用不了。
+ *
+ * 安全上沒有變差：名單本來就是 doGet 公開回傳的，而且光有 credentialId
+ * 也按不出指紋 —— 私鑰在手機的安全晶片裡，偽造 localStorage 只會拿到 NotAllowedError。
+ */
+export function saveCachedTrustedDevices(devices: TrustedDevice[], max: number) {
+  try {
+    localStorage.setItem(STORAGE_KEY_DEVICES_CACHE, JSON.stringify({ devices, max }));
+  } catch {
+    // ignore
+  }
+}
+
+export function getCachedTrustedDevices(): { devices: TrustedDevice[]; max: number } | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_DEVICES_CACHE);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { devices?: unknown; max?: unknown };
+    const devices = parseTrustedDevices(parsed?.devices);
+    const max = Number(parsed?.max);
+    return { devices, max: Number.isFinite(max) && max > 0 ? max : 2 };
+  } catch {
+    return null;
+  }
+}
+
 export function clearLocalData() {
   try {
     localStorage.removeItem(STORAGE_KEY_LOGS);
+    localStorage.removeItem(STORAGE_KEY_DEVICES_CACHE);
     localStorage.removeItem(STORAGE_KEY_USERS);
     localStorage.removeItem(STORAGE_KEY_TASKS_CACHE);
     localStorage.removeItem(STORAGE_KEY_USERS_CACHE);

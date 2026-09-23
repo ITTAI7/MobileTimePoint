@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit, RecalcResult, TrustedDevice } from './types';
 import {
   fetchSheetData,
@@ -20,6 +20,8 @@ import {
   recalculateGoogleSheet,
   registerTrustedDevice,
   removeTrustedDevice,
+  getCachedTrustedDevices,
+  saveCachedTrustedDevices,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -102,8 +104,16 @@ export default function App() {
   const [passwordHash, setPasswordHash] = useState<string | null>(() => getCachedPasswordHash());
 
   /* ─── 受信任裝置（指紋解鎖）─── */
-  const [trustedDevices, setTrustedDevices] = useState<TrustedDevice[]>([]);
-  const [maxTrustedDevices, setMaxTrustedDevices] = useState(2);
+  // 從快取起手：不然開 App 的前 2~3 秒與離線時，指紋按鈕都不會出現
+  const cachedDevicesOnMount = getCachedTrustedDevices();
+  const [trustedDevices, setTrustedDevices] = useState<TrustedDevice[]>(
+    () => cachedDevicesOnMount?.devices ?? []
+  );
+  const [maxTrustedDevices, setMaxTrustedDevices] = useState(
+    () => cachedDevicesOnMount?.max ?? 2
+  );
+  // 剛登記完的短暫保護期：避免在途中的舊回應把本機憑證判成「不在名單上」而清掉
+  const enrollGuardUntil = useRef(0);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [localCredentialId, setLocalCredentialId] = useState<string | null>(() =>
     getStoredCredentialId()
@@ -124,23 +134,63 @@ export default function App() {
     label: string,
     password: string
   ): Promise<{ ok: boolean; message?: string }> => {
+    // 名額滿了就別建憑證：手機一旦產生 passkey，網頁沒有任何 API 能刪掉它，
+    // 被伺服器拒絕後那把憑證會永遠留在手機的密碼管理員裡。
+    //
+    // 這裡刻意用已載入的名單做「同步」檢查，不先去查伺服器 ——
+    // credentials.create 需要使用者手勢，而手勢授權只有幾秒，
+    // 中間插一個 2~3 秒的請求反而會讓指紋視窗叫不出來（Safari 尤其嚴格）。
+    // 名單萬一是舊的也無妨，伺服器仍會把關，只是會多留一把沒用的憑證。
+    const effectiveMax = maxTrustedDevices;
+    if (
+      !trustedDevices.some((d) => d.credentialId === localCredentialId) &&
+      trustedDevices.length >= effectiveMax
+    ) {
+      return {
+        ok: false,
+        message: `已經登記 ${effectiveMax} 支裝置，請先解除其中一支的授權`,
+      };
+    }
+
     const bio = await registerBiometric(label);
     if (!bio.ok) return { ok: false, message: bio.message };
 
     const credentialId = getStoredCredentialId();
     if (!credentialId) return { ok: false, message: '沒有取得憑證識別碼' };
 
+    enrollGuardUntil.current = Date.now() + 20000;
     const res = await registerTrustedDevice(credentialId, label, password);
-    if (!res.ok) {
-      // 伺服器不收（例如名額滿了）就把本機憑證清掉，避免本機以為自己已登記
-      clearStoredCredential();
-      setLocalCredentialId(null);
-      return { ok: false, message: res.message };
+
+    if (res.ok) {
+      setTrustedDevices(res.devices);
+      saveCachedTrustedDevices(res.devices, effectiveMax);
+      setLocalCredentialId(credentialId);
+      return { ok: true };
     }
 
-    setTrustedDevices(res.devices);
-    setLocalCredentialId(credentialId);
-    return { ok: true };
+    // 伺服器明確拒絕（密碼錯、名額滿）才是真的沒寫進去。
+    // 沒有 code 代表連線層失敗 —— GAS 的回應會間歇性遺失，但資料常常已經寫進去了，
+    // 這時直接清掉本機憑證，會讓伺服器名單上多一筆沒有任何裝置對應的幽靈，白白吃掉名額。
+    if (!res.code) {
+      try {
+        const check = await fetchSheetData(true);
+        setTrustedDevices(check.trustedDevices);
+        setMaxTrustedDevices(check.maxTrustedDevices);
+        saveCachedTrustedDevices(check.trustedDevices, check.maxTrustedDevices);
+
+        if (check.trustedDevices.some((d) => d.credentialId === credentialId)) {
+          setLocalCredentialId(credentialId);
+          return { ok: true };   // 回應掉了，但其實登記成功
+        }
+      } catch {
+        // 連核對都失敗：保留本機憑證，下次重試會沿用同一個 id（伺服器端是冪等的）
+        return { ok: false, message: '送出了但無法確認結果，請稍後重新整理再看一次' };
+      }
+    }
+
+    clearStoredCredential();
+    setLocalCredentialId(null);
+    return { ok: false, message: res.message };
   };
 
   const revokeDevice = async (
@@ -151,6 +201,7 @@ export default function App() {
     if (!res.ok) return { ok: false, message: res.message };
 
     setTrustedDevices(res.devices);
+    saveCachedTrustedDevices(res.devices, maxTrustedDevices);
     if (credentialId === localCredentialId) {
       clearStoredCredential();
       setLocalCredentialId(null);
@@ -213,6 +264,20 @@ export default function App() {
       setAudit(data.audit);
       setTrustedDevices(data.trustedDevices);
       setMaxTrustedDevices(data.maxTrustedDevices);
+      saveCachedTrustedDevices(data.trustedDevices, data.maxTrustedDevices);
+
+      // 這台的憑證已經被別支手機解除授權 —— 順手清掉，否則重新登記時
+      // 會再產生一把新的 passkey，舊的留在手機裡變成垃圾。
+      // 剛登記完的短暫期間不動它：在途中的舊回應可能還看不到這一筆。
+      if (Date.now() >= enrollGuardUntil.current) {
+        // 直接讀 localStorage，不靠 state ——
+        // loadData 的相依是空陣列，閉包裡的 localCredentialId 會是舊的
+        const localId = getStoredCredentialId();
+        if (localId && !data.trustedDevices.some((d) => d.credentialId === localId)) {
+          clearStoredCredential();
+          setLocalCredentialId(null);
+        }
+      }
 
       // Tasks
       if (data.tasks.length > 0) {
