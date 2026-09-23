@@ -75,12 +75,23 @@ export interface SheetAuditOrphan {
   sum: number;
 }
 
+/**
+ * 每列「當下餘額」與依時間累加的結果不符。
+ * 總分仍然正確，所以單看總分比對抓不出來，但明細顯示的餘額已經錯了。
+ */
+export interface SheetAuditStale {
+  userId: string;
+  name: string;
+  rows: number;
+}
+
 export interface SheetAudit {
   ok: boolean;
   mismatches: SheetAuditMismatch[];
   orphans: SheetAuditOrphan[];
   /** 重複的 LogID，多半是複製整列貼上卻忘了改編號 */
   duplicateLogIds: string[];
+  staleBalances: SheetAuditStale[];
   skipped?: string;
 }
 

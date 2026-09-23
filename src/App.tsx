@@ -6,8 +6,15 @@ import {
   saveLocalLogs,
   getLocalUsersOverride,
   saveLocalUsersOverride,
+  getCachedTasks,
+  saveCachedTasks,
+  getCachedUsers,
+  saveCachedUsers,
   clearLocalData,
   getParentPassword,
+  hashPassword,
+  getCachedPasswordHash,
+  saveCachedPasswordHash,
   writeRecordToGoogleSheet,
   addNewTaskToGoogleSheet,
   recalculateGoogleSheet,
@@ -35,16 +42,24 @@ import {
 } from 'lucide-react';
 
 export default function App() {
-  const [tasks, setTasks] = useState<CleanTask[]>(INITIAL_TASKS_SEED);
-  const [users, setUsers] = useState<CleanUser[]>(INITIAL_USERS_SEED);
-  const [records, setRecords] = useState<CleanRecord[]>([]);
+  // 用 lazy initializer 在「第一次渲染之前」就把快取讀進來，
+  // 這樣有快取時完全不會出現載入轉圈，畫面是秒開的。
+  const cachedUsersOnMount = getCachedUsers();
+
+  const [tasks, setTasks] = useState<CleanTask[]>(() => getCachedTasks() ?? INITIAL_TASKS_SEED);
+  const [users, setUsers] = useState<CleanUser[]>(() => cachedUsersOnMount ?? INITIAL_USERS_SEED);
+  const [records, setRecords] = useState<CleanRecord[]>(() => getLocalLogs());
+
+  // 資料是否已經跟 Google Sheet 同步過（快取畫出來的不算）
+  const [hasFreshData, setHasFreshData] = useState(false);
   const [rawResponse, setRawResponse] = useState<RawSheetResponse | null>(null);
   const [audit, setAudit] = useState<SheetAudit | null>(null);
   const [recalcPreview, setRecalcPreview] = useState<RecalcResult | null>(null);
   const [recalcBusy, setRecalcBusy] = useState(false);
   const [recalcError, setRecalcError] = useState<string | null>(null);
 
-  const [isLoading, setIsLoading] = useState(true);
+  // 只有「完全沒有快取」時才顯示載入畫面
+  const [isLoading, setIsLoading] = useState(cachedUsersOnMount === null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -74,17 +89,55 @@ export default function App() {
     }
   }, [adminUser]);
 
-  // Load and merge data from Google Sheet & Local Storage
-  const loadData = useCallback(async (isManualRefresh = false) => {
-    if (isManualRefresh) {
-      setIsRefreshing(true);
-    } else {
-      setIsLoading(true);
+  // 密碼的本機雜湊，讓解鎖不必等連線
+  const [passwordHash, setPasswordHash] = useState<string | null>(() => getCachedPasswordHash());
+
+  // 只在資料確實同步過之後才存雜湊 ——
+  // 否則連線失敗時 effectivePassword 會是內建預設值，存下去就把錯的密碼記起來了。
+  useEffect(() => {
+    if (!hasFreshData || !effectivePassword) return;
+    let cancelled = false;
+    hashPassword(effectivePassword).then((h) => {
+      if (cancelled || !h) return;
+      saveCachedPasswordHash(h);
+      setPasswordHash(h);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [hasFreshData, effectivePassword]);
+
+  /**
+   * 驗證家長密碼。
+   * 資料已同步時直接比對明文（最權威）；否則用本機雜湊，使用者就不用等那 3 秒。
+   */
+  const verifyParentPassword = async (input: string): Promise<boolean> => {
+    const candidate = input.trim();
+    if (!candidate) return false;
+
+    if (hasFreshData) return candidate === effectivePassword.trim();
+
+    if (passwordHash) {
+      const h = await hashPassword(candidate);
+      return h !== null && h === passwordHash;
     }
+    return false;
+  };
+
+  // Load and merge data from Google Sheet & Local Storage
+  /**
+   * 回傳這次抓到的紀錄，讓「寫入結果不確定」時可以據此判斷實際有沒有寫進去。
+   *
+   * @param fresh 略過伺服器快取。開啟 App 時不用（快取快很多），
+   *              使用者按重新整理、或要確認剛才的寫入時才需要。
+   */
+  const loadData = useCallback(async (fresh = false): Promise<CleanRecord[] | null> => {
+    // 畫面已經用快取畫好了，這裡只是背景更新，所以一律走 refreshing 而不是 loading
+    setIsRefreshing(true);
     setErrorMessage(null);
 
     try {
-      const data = await fetchSheetData();
+      const data = await fetchSheetData(fresh);
       setRawResponse(data.raw);
       setAudit(data.audit);
 
@@ -126,21 +179,32 @@ export default function App() {
         sheetUserPoints[u.id] = u.currentPoints;
       });
       saveLocalUsersOverride(sheetUserPoints);
+
+      // 供下次開啟時立刻繪製（使用者資料會自動去掉密碼）
+      saveCachedTasks(data.tasks);
+      saveCachedUsers(mergedUsers);
+
+      setHasFreshData(true);
+      return sortedRecords;
     } catch (err: unknown) {
       console.warn('Google Sheet fetch error:', err);
       const msg = err instanceof Error ? err.message : '連線失敗';
       setErrorMessage(msg);
 
-      // Fallback gracefully to local data
-      const localLogs = getLocalLogs();
-      const localUsersOverride = getLocalUsersOverride();
-      const fallbackUsers = INITIAL_USERS_SEED.map((u) => ({
-        ...u,
-        currentPoints: localUsersOverride[u.id] !== undefined ? localUsersOverride[u.id] : u.currentPoints,
-      }));
-
-      setUsers(fallbackUsers);
-      setRecords(localLogs);
+      // 已經用快取畫出畫面時就維持現狀 ——
+      // 拿內建種子資料覆蓋掉真實的快取，反而會讓畫面顯示錯的名字與分數。
+      if (getCachedUsers() === null) {
+        const localUsersOverride = getLocalUsersOverride();
+        setUsers(
+          INITIAL_USERS_SEED.map((u) => ({
+            ...u,
+            currentPoints:
+              localUsersOverride[u.id] !== undefined ? localUsersOverride[u.id] : u.currentPoints,
+          }))
+        );
+        setRecords(getLocalLogs());
+      }
+      return null;
     } finally {
       setIsLoading(false);
       setIsRefreshing(false);
@@ -181,63 +245,63 @@ export default function App() {
   const handleParentSubmitRecord = async (
     newRecordData: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
   ): Promise<{ ok: boolean; message?: string }> => {
-    // 1. Calculate new points for the targeted child
+    // 一切以試算表為準：**先寫入、確認成功後才更新畫面**，不做樂觀更新。
+    // 代價是送出後要等約 3 秒；換來的是畫面上的數字必定與試算表一致。
     const userToUpdate = users.find((u) => u.id === newRecordData.userId);
     const prevPoints = userToUpdate ? userToUpdate.currentPoints : 0;
-    const newBalance = prevPoints + newRecordData.points;
 
-    // 2. Create the clean record with consistent LogID
     // timestamp 由表單決定（可以補登過去的日期），不是固定用「現在」
-    const createdRecord: CleanRecord = {
+    const logId = `L${Date.now()}`;
+    const pendingRecord: CleanRecord = {
       ...newRecordData,
-      id: `L${Date.now()}`,
-      balanceAfter: newBalance,
+      id: logId,
+      balanceAfter: prevPoints + newRecordData.points,
       isLocal: true,
     };
 
-    // 3. Update Users in state and local storage immediately
-    const updatedUsers = users.map((u) => {
-      if (u.id === newRecordData.userId) {
-        return { ...u, currentPoints: newBalance };
-      }
-      return u;
-    });
-    setUsers(updatedUsers);
-
-    const userMap = getLocalUsersOverride();
-    userMap[newRecordData.userId] = newBalance;
-    saveLocalUsersOverride(userMap);
-
-    // 4. Update Records in state and local storage
-    const currentLocalLogs = getLocalLogs();
-    const updatedLocalLogs = [createdRecord, ...currentLocalLogs];
-    saveLocalLogs(updatedLocalLogs);
-
-    setRecords((prev) => [createdRecord, ...prev]);
-
-    // 5. Trigger writing to Google Sheet via doPost
     setIsWritingToSheet(true);
     try {
-      const result = await writeRecordToGoogleSheet(createdRecord, newBalance);
+      const result = await writeRecordToGoogleSheet(pendingRecord, pendingRecord.balanceAfter);
 
-      // 伺服器明確拒絕（例如兌換點數不足）：把上面的樂觀更新全部回復，
-      // 否則畫面會留下一筆試算表根本沒收下的紀錄。
-      if (!result.success) {
-        setUsers(users);
-        const revertMap = getLocalUsersOverride();
-        revertMap[newRecordData.userId] = prevPoints;
-        saveLocalUsersOverride(revertMap);
-
-        saveLocalLogs(currentLocalLogs);
-        setRecords((prev) => prev.filter((r) => r.id !== createdRecord.id));
-
+      // 伺服器明確拒絕（例如兌換點數不足）——畫面完全沒動過，直接回報
+      if (!result.success && result.confirmed) {
         return { ok: false, message: result.message || '寫入 Google Sheet 失敗' };
       }
 
-      return { ok: true };
-    } catch (err) {
-      console.warn('writeRecordToGoogleSheet error:', err);
-      return { ok: true };
+      // 明確成功：用伺服器回傳的權威餘額更新，而不是前端自己加減出來的數字
+      if (result.success && result.confirmed) {
+        const confirmedBalance =
+          typeof result.newBalance === 'number' ? result.newBalance : pendingRecord.balanceAfter;
+        const confirmedRecord: CleanRecord = { ...pendingRecord, balanceAfter: confirmedBalance };
+
+        setUsers((prev) =>
+          prev.map((u) =>
+            u.id === newRecordData.userId ? { ...u, currentPoints: confirmedBalance } : u
+          )
+        );
+        const userMap = getLocalUsersOverride();
+        userMap[newRecordData.userId] = confirmedBalance;
+        saveLocalUsersOverride(userMap);
+
+        setRecords((prev) => [confirmedRecord, ...prev]);
+        saveLocalLogs([confirmedRecord, ...getLocalLogs()]);
+
+        return { ok: true };
+      }
+
+      // 不確定有沒有寫進去（轉址掉回應時約兩成機率）——
+      // 不要用猜的，直接回頭讀試算表看實際結果。
+      const refreshed = await loadData(true);
+      if (refreshed === null) {
+        return {
+          ok: false,
+          message: '已送出但無法確認結果，也讀不到試算表。請稍後按重新整理確認，不要直接重送。',
+        };
+      }
+      if (refreshed.some((r) => r.id === logId)) {
+        return { ok: true };
+      }
+      return { ok: false, message: '這筆沒有寫入試算表，請再登記一次' };
     } finally {
       setIsWritingToSheet(false);
     }
@@ -295,13 +359,13 @@ export default function App() {
       return;
     }
     setRecalcPreview(null);
+    // 剛改過試算表，一定要拿最新的
     await loadData(true);
   };
 
   // Reset Local Additions
   const handleResetLocalData = () => {
-    localStorage.removeItem('weekend_points_local_logs_v1');
-    localStorage.removeItem('weekend_points_local_users_v1');
+    clearLocalData();
     loadData(true);
   };
 
@@ -437,7 +501,8 @@ export default function App() {
           !audit.ok &&
           (audit.mismatches.length > 0 ||
             audit.orphans.length > 0 ||
-            audit.duplicateLogIds.length > 0) && (
+            audit.duplicateLogIds.length > 0 ||
+            audit.staleBalances.length > 0) && (
           <div className="mb-4 p-3 rounded-2xl bg-orange-50 border border-orange-300 text-orange-900 text-xs">
             <div className="flex items-center gap-2">
               <ShieldCheck className="w-4 h-4 text-orange-600 shrink-0" />
@@ -467,6 +532,22 @@ export default function App() {
                 ))}
                 <p className="text-[11px] text-orange-700/90">
                   這些分數不屬於任何孩子，通常是 UserID 打錯。
+                </p>
+              </div>
+            )}
+
+            {audit.staleBalances.length > 0 && (
+              <div className="mt-2 pt-2 border-t border-orange-200 space-y-1">
+                <p className="font-semibold">明細的餘額欄過期</p>
+                {audit.staleBalances.map((s) => (
+                  <div key={s.userId} className="flex items-center justify-between gap-2">
+                    <span className="font-sans font-semibold">{s.name}</span>
+                    <span className="text-orange-700 font-mono">{s.rows} 列</span>
+                  </div>
+                ))}
+                <p className="text-[11px] text-orange-700/90">
+                  總分是對的，但明細每列顯示的「餘額」不對。多半是補登了過去日期的紀錄。
+                  按下面的重新計算即可修正。
                 </p>
               </div>
             )}
@@ -599,7 +680,9 @@ export default function App() {
       {/* Parent Password Verification Modal */}
       {showPasswordModal && (
         <ParentPasswordModal
-          expectedPassword={effectivePassword}
+          onVerify={verifyParentPassword}
+          // 有本機雜湊就能立刻驗證；兩者皆無時才需要等連線
+          isSyncing={!hasFreshData && !passwordHash}
           onSuccess={handlePasswordSuccess}
           onClose={() => setShowPasswordModal(false)}
         />

@@ -577,7 +577,7 @@ export const ParentView: React.FC<Props> = ({
           {isWritingToSheet ? (
             <>
               <Loader2 className="w-5 h-5 animate-spin" />
-              <span>正在寫入 Google Sheet 存摺...</span>
+              <span>正在寫入並確認中，約需數秒...</span>
             </>
           ) : (
             <>
@@ -592,10 +592,10 @@ export const ParentView: React.FC<Props> = ({
           <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
             <div>
-              <p className="font-bold text-rose-800">登記失敗，已還原</p>
+              <p className="font-bold text-rose-800">登記失敗</p>
               <p className="text-rose-700 mt-0.5">{submitError}</p>
               <p className="text-rose-600/80 mt-1">
-                點數與紀錄都沒有變動。請按右上角重新整理取得最新餘額後再試。
+                試算表沒有寫入這筆，點數與紀錄都沒有變動。
               </p>
             </div>
           </div>
@@ -612,7 +612,7 @@ export const ParentView: React.FC<Props> = ({
             <div className="space-y-1">
               <p className="font-bold text-emerald-800">登記成功！</p>
               <p className="text-emerald-700">
-                小孩存摺與餘額已即時更新，並同步送出寫入 Google Sheet『積分明細/點數存摺』。
+                已確認寫入 Google Sheet『點數存摺』，畫面上的餘額就是試算表的實際數字。
               </p>
               {taskSavedMessage && (
                 <p className="text-blue-700 font-medium flex items-center gap-1 mt-1">

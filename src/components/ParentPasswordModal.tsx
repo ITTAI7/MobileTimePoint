@@ -2,23 +2,34 @@ import React, { useState } from 'react';
 import { Lock, Eye, EyeOff, X, ShieldAlert, Check } from 'lucide-react';
 
 interface Props {
-  expectedPassword: string;
+  /** 驗證交給 App —— 這個元件不需要知道密碼本身 */
+  onVerify: (password: string) => Promise<boolean>;
+  /** 既沒有本機雜湊、資料也還沒同步，此時無從驗證 */
+  isSyncing?: boolean;
   onSuccess: () => void;
   onClose: () => void;
 }
 
 export const ParentPasswordModal: React.FC<Props> = ({
-  expectedPassword,
+  onVerify,
+  isSyncing = false,
   onSuccess,
   onClose,
 }) => {
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState(false);
+  const [checking, setChecking] = useState(false);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (password.trim() === expectedPassword.trim()) {
+    if (isSyncing || checking) return;
+
+    setChecking(true);
+    const ok = await onVerify(password);
+    setChecking(false);
+
+    if (ok) {
       setError(false);
       onSuccess();
     } else {
@@ -85,7 +96,14 @@ export const ParentPasswordModal: React.FC<Props> = ({
               </button>
             </div>
 
-            {error && (
+            {isSyncing && (
+              <p className="text-xs text-slate-500 flex items-center gap-1.5 mt-1">
+                <span className="w-3 h-3 border-2 border-slate-400 border-t-transparent rounded-full animate-spin shrink-0" />
+                正在同步最新資料，稍候即可解鎖
+              </p>
+            )}
+
+            {error && !isSyncing && (
               <p className="text-xs text-rose-600 flex items-center gap-1 mt-1 animate-in fade-in">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
                 密碼錯誤，請重新輸入
@@ -103,10 +121,11 @@ export const ParentPasswordModal: React.FC<Props> = ({
             </button>
             <button
               type="submit"
-              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold shadow-md shadow-orange-500/20 active:scale-95 transition flex items-center justify-center gap-1.5"
+              disabled={isSyncing || checking}
+              className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold shadow-md shadow-orange-500/20 active:scale-95 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:active:scale-100"
             >
               <Check className="w-4 h-4" />
-              <span>驗證解鎖</span>
+              <span>{isSyncing ? '請稍候…' : '驗證解鎖'}</span>
             </button>
           </div>
         </form>

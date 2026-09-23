@@ -98,6 +98,49 @@ export function getParentPassword(sheetPassword?: string): string {
   return (sheetPassword && sheetPassword.trim()) ? sheetPassword.trim() : '77777777';
 }
 
+/* ─────────────── 家長密碼的本機雜湊 ───────────────
+ * 密碼存在試算表裡，所以原本每次都要等連線回來才能驗證（約 3 秒）。
+ * 這裡把密碼的 SHA-256 存在本機，解鎖時改為雜湊比對，不用連線。
+ *
+ * 只存雜湊不存明文，小孩開開發者工具看到的是一串 16 進位字元。
+ * 要強調的是：**這是遮蔽，不是加密**。四位數密碼的雜湊對懂的人來說
+ * 幾毫秒就能暴力反推。它擋的是「隨手翻一下」，不是有心破解。
+ */
+
+const PASSWORD_HASH_KEY = 'weekend_points_parent_password_hash_v1';
+const HASH_SALT = 'mobiletimepoint:v1:';
+
+/** 算不出來時回 null（瀏覽器不支援或非安全來源），呼叫端要能退回連線驗證 */
+export async function hashPassword(password: string): Promise<string | null> {
+  try {
+    const subtle = globalThis.crypto?.subtle;
+    if (!subtle) return null;
+    const data = new TextEncoder().encode(HASH_SALT + password.trim());
+    const buf = await subtle.digest('SHA-256', data);
+    return Array.from(new Uint8Array(buf))
+      .map((b) => b.toString(16).padStart(2, '0'))
+      .join('');
+  } catch {
+    return null;
+  }
+}
+
+export function getCachedPasswordHash(): string | null {
+  try {
+    return localStorage.getItem(PASSWORD_HASH_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function saveCachedPasswordHash(hash: string) {
+  try {
+    localStorage.setItem(PASSWORD_HASH_KEY, hash);
+  } catch {
+    // ignore
+  }
+}
+
 export function setParentPassword(newPassword: string): void {
   try {
     localStorage.setItem('weekend_points_parent_password', newPassword.trim());
@@ -191,11 +234,21 @@ export function parseAudit(raw: unknown): SheetAudit | null {
     String(x)
   );
 
+  const staleBalances = (Array.isArray(a.staleBalances) ? a.staleBalances : []).map((item) => {
+    const s = (item || {}) as Record<string, unknown>;
+    return {
+      userId: String(s.userId ?? ''),
+      name: String(s.name ?? s.userId ?? ''),
+      rows: Number(s.rows) || 0,
+    };
+  });
+
   return {
     ok: a.ok,
     mismatches,
     orphans,
     duplicateLogIds,
+    staleBalances,
     skipped: typeof a.skipped === 'string' ? a.skipped : undefined,
   };
 }
@@ -268,14 +321,19 @@ export async function recalculateGoogleSheet(dryRun: boolean): Promise<RecalcRes
   }
 }
 
-export async function fetchSheetData(customUrl?: string): Promise<{
+/**
+ * @param fresh 略過伺服器端快取，強制重讀試算表。
+ *              平常開啟用快取（快很多）；按下重新整理、或需要確認剛才的寫入時才用 true。
+ */
+export async function fetchSheetData(fresh = false, customUrl?: string): Promise<{
   tasks: CleanTask[];
   users: CleanUser[];
   records: CleanRecord[];
   audit: SheetAudit | null;
   raw: RawSheetResponse;
 }> {
-  const url = customUrl || getStoredApiUrl();
+  const base = customUrl || getStoredApiUrl();
+  const url = fresh ? `${base}${base.includes('?') ? '&' : '?'}fresh=1` : base;
 
   // Apps Script 的 /exec 會 302 轉到 googleusercontent.com，那一跳約有兩成機率回 404。
   // 這是 Google 端的間歇性問題，不是網址或權限錯誤，所以重試即可 ——
@@ -358,10 +416,63 @@ export function saveLocalUsersOverride(map: Record<string, number>) {
   }
 }
 
+/* ─────────────── 首次繪製用的快取 ───────────────
+ * 讀 Google Sheet 要 2.5~3 秒，而且時間全花在 Apps Script 執行，縮小傳輸量沒用。
+ * 所以改成：開啟時先用上次的資料立刻畫出畫面，背景再去抓新的。
+ */
+
+const STORAGE_KEY_TASKS_CACHE = 'weekend_points_cache_tasks_v1';
+const STORAGE_KEY_USERS_CACHE = 'weekend_points_cache_users_v1';
+
+export function saveCachedTasks(tasks: CleanTask[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY_TASKS_CACHE, JSON.stringify(tasks));
+  } catch {
+    // ignore
+  }
+}
+
+export function getCachedTasks(): CleanTask[] | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_TASKS_CACHE);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 快取使用者資料，但**不包含密碼** ——
+ * 密碼只留在記憶體，不落地到 localStorage，避免小孩用開發者工具翻出來。
+ * 代價是資料還沒抓回來之前無法驗證家長密碼，這由 hasFreshData 擋住。
+ */
+export function saveCachedUsers(users: CleanUser[]) {
+  try {
+    const withoutPassword = users.map(({ password: _password, ...rest }) => rest);
+    localStorage.setItem(STORAGE_KEY_USERS_CACHE, JSON.stringify(withoutPassword));
+  } catch {
+    // ignore
+  }
+}
+
+export function getCachedUsers(): CleanUser[] | null {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_USERS_CACHE);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export function clearLocalData() {
   try {
     localStorage.removeItem(STORAGE_KEY_LOGS);
     localStorage.removeItem(STORAGE_KEY_USERS);
+    localStorage.removeItem(STORAGE_KEY_TASKS_CACHE);
+    localStorage.removeItem(STORAGE_KEY_USERS_CACHE);
+    localStorage.removeItem(PASSWORD_HASH_KEY);
   } catch {
     // ignore
   }
@@ -422,7 +533,19 @@ export function pointsToTime(points: number): { minutes: number; text: string; h
 }
 
 export interface WriteRecordResult {
+  /** false 代表伺服器明確拒絕 */
   success: boolean;
+  /**
+   * 伺服器是否明確回覆成功。
+   *
+   * false 表示「不知道寫進去了沒有」——Apps Script 的轉址約有兩成機率掉回應，
+   * 但那時資料其實常常已經寫入。這種情況**絕對不能當成失敗**，
+   * 否則使用者會重送而產生重複紀錄；正確做法是回頭讀試算表確認。
+   */
+  confirmed: boolean;
+  /** 伺服器依試算表現值算出的權威餘額，只有 confirmed 時才有 */
+  newBalance?: number;
+  logId?: string;
   message?: string;
   code?: string;
   isMissingDoPost?: boolean;
@@ -468,9 +591,10 @@ export async function writeRecordToGoogleSheet(
     });
 
     const responseText = await response.text();
-    if (responseText.includes('找不到以下指令碼函式：doPost') || responseText.includes('doPost')) {
+    if (responseText.includes('找不到以下指令碼函式：doPost')) {
       return {
         success: false,
+        confirmed: true,
         isMissingDoPost: true,
         message: 'Google Apps Script 尚未部署 doPost 函式',
       };
@@ -478,26 +602,34 @@ export async function writeRecordToGoogleSheet(
 
     try {
       const json = JSON.parse(responseText);
+
       if (json.status === 'success' || json.success) {
-        return { success: true, message: '已成功寫入 Google Sheet！' };
+        return {
+          success: true,
+          confirmed: true,
+          // 伺服器是讀試算表現值算出來的，比前端自己加減可靠
+          newBalance: typeof json.newBalance === 'number' ? json.newBalance : undefined,
+          logId: typeof json.logId === 'string' ? json.logId : undefined,
+          message: '已成功寫入 Google Sheet！',
+        };
       }
+
       // 伺服器明確拒絕（例如兌換點數不足）——必須回報失敗，不能當成成功
       if (json.status === 'error') {
         return {
           success: false,
+          confirmed: true,
           code: json.code,
           message: json.message || '寫入 Google Sheet 失敗',
         };
       }
     } catch {
-      if (response.ok) {
-        return { success: true };
-      }
+      // 回應不是 JSON（多半是轉址失敗的 HTML）——寫入可能已經完成，無法判斷
     }
 
-    return { success: true };
+    return { success: true, confirmed: false };
   } catch (err: unknown) {
-    // If CORS preflight issue or redirect issue, attempt fire-and-forget
+    // 連線層失敗：改用 no-cors 再送一次。這條路讀不到回應，所以一律標為不確定。
     try {
       await fetch(apiUrl, {
         method: 'POST',
@@ -507,13 +639,10 @@ export async function writeRecordToGoogleSheet(
           'Content-Type': 'text/plain;charset=utf-8',
         },
       });
-      return { success: true };
-    } catch (e2: unknown) {
+      return { success: true, confirmed: false };
+    } catch {
       const errorMsg = err instanceof Error ? err.message : '連線失敗';
-      return {
-        success: false,
-        message: errorMsg,
-      };
+      return { success: false, confirmed: false, message: errorMsg };
     }
   }
 }
