@@ -412,6 +412,13 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
   records: CleanRecord[];
   audit: SheetAudit | null;
   trustedDevices: TrustedDevice[];
+  /**
+   * 這次回應到底有沒有帶裝置名單這個欄位。
+   * 用來區分「伺服器說名單是空的」與「伺服器根本沒有這個功能」——
+   * 後者發生在 GAS 被回退到舊版部署時，若當成空名單處理，
+   * 會把所有裝置默默地解除授權。
+   */
+  hasDeviceRegistry: boolean;
   maxTrustedDevices: number;
   raw: RawSheetResponse;
 }> {
@@ -464,6 +471,7 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
     records,
     audit: parseAudit(data.audit),
     trustedDevices: parseTrustedDevices(data.trustedDevices),
+    hasDeviceRegistry: Array.isArray(data.trustedDevices),
     // 伺服器沒回報時退回 2，與後端的 MAX_TRUSTED_DEVICES 一致
     maxTrustedDevices: Number(data.maxTrustedDevices) || 2,
     raw: data,

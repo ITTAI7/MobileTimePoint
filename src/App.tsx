@@ -112,8 +112,10 @@ export default function App() {
   const [maxTrustedDevices, setMaxTrustedDevices] = useState(
     () => cachedDevicesOnMount?.max ?? 2
   );
-  // 剛登記完的短暫保護期：避免在途中的舊回應把本機憑證判成「不在名單上」而清掉
-  const enrollGuardUntil = useRef(0);
+  // 最後一次登記完成的時間。只有「在這之後才發出」的請求，其回應才反映得出新登記，
+  // 才能拿來判斷本機憑證是否已失效。用固定秒數的保護期不夠可靠 ——
+  // GAS 偶爾會塞車到數十秒，窗口開多大都可能被穿過去。
+  const lastEnrollAt = useRef(0);
   const [bioAvailable, setBioAvailable] = useState(false);
   const [localCredentialId, setLocalCredentialId] = useState<string | null>(() =>
     getStoredCredentialId()
@@ -158,8 +160,8 @@ export default function App() {
     const credentialId = getStoredCredentialId();
     if (!credentialId) return { ok: false, message: '沒有取得憑證識別碼' };
 
-    enrollGuardUntil.current = Date.now() + 20000;
     const res = await registerTrustedDevice(credentialId, label, password);
+    lastEnrollAt.current = Date.now();
 
     if (res.ok) {
       setTrustedDevices(res.devices);
@@ -174,6 +176,10 @@ export default function App() {
     if (!res.code) {
       try {
         const check = await fetchSheetData(true);
+        if (!check.hasDeviceRegistry) {
+          // 伺服器根本沒回報名單，無從判斷。保留憑證，不要亂清。
+          return { ok: false, message: '送出了但無法確認結果，請稍後重新整理再看一次' };
+        }
         setTrustedDevices(check.trustedDevices);
         setMaxTrustedDevices(check.maxTrustedDevices);
         saveCachedTrustedDevices(check.trustedDevices, check.maxTrustedDevices);
@@ -257,25 +263,30 @@ export default function App() {
     // 畫面已經用快取畫好了，這裡只是背景更新，所以一律走 refreshing 而不是 loading
     setIsRefreshing(true);
     setErrorMessage(null);
+    const startedAt = Date.now();
 
     try {
       const data = await fetchSheetData(fresh);
       setRawResponse(data.raw);
       setAudit(data.audit);
-      setTrustedDevices(data.trustedDevices);
-      setMaxTrustedDevices(data.maxTrustedDevices);
-      saveCachedTrustedDevices(data.trustedDevices, data.maxTrustedDevices);
+      // 舊版 GAS 沒有這個欄位。當成「名單是空的」會把所有裝置默默解除授權，
+      // 所以伺服器沒回報時，裝置狀態一律原封不動。
+      if (data.hasDeviceRegistry) {
+        setTrustedDevices(data.trustedDevices);
+        setMaxTrustedDevices(data.maxTrustedDevices);
+        saveCachedTrustedDevices(data.trustedDevices, data.maxTrustedDevices);
 
-      // 這台的憑證已經被別支手機解除授權 —— 順手清掉，否則重新登記時
-      // 會再產生一把新的 passkey，舊的留在手機裡變成垃圾。
-      // 剛登記完的短暫期間不動它：在途中的舊回應可能還看不到這一筆。
-      if (Date.now() >= enrollGuardUntil.current) {
-        // 直接讀 localStorage，不靠 state ——
-        // loadData 的相依是空陣列，閉包裡的 localCredentialId 會是舊的
-        const localId = getStoredCredentialId();
-        if (localId && !data.trustedDevices.some((d) => d.credentialId === localId)) {
-          clearStoredCredential();
-          setLocalCredentialId(null);
+        // 這台的憑證已經被別支手機解除授權 —— 順手清掉，否則重新登記時
+        // 會再產生一把新的 passkey，舊的留在手機裡變成垃圾。
+        // 只有「在最後一次登記之後才發出」的請求才算數，否則可能是在途中的舊回應。
+        if (startedAt > lastEnrollAt.current) {
+          // 直接讀 localStorage，不靠 state ——
+          // loadData 的相依是空陣列，閉包裡的 localCredentialId 會是舊的
+          const localId = getStoredCredentialId();
+          if (localId && !data.trustedDevices.some((d) => d.credentialId === localId)) {
+            clearStoredCredential();
+            setLocalCredentialId(null);
+          }
         }
       }
 
