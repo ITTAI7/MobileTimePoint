@@ -6,6 +6,8 @@ interface Props {
   onVerify: (password: string) => Promise<boolean>;
   /** 既沒有本機雜湊、資料也還沒同步，此時無從驗證 */
   isSyncing?: boolean;
+  /** 試算表的 ADM 密碼欄是空的 —— 沒有任何密碼能通過，要請家長先去設定 */
+  notConfigured?: boolean;
   /** 這台裝置已登記指紋時才會傳入；回 true 代表驗證通過 */
   onBiometric?: () => Promise<{ ok: boolean; message?: string }>;
   onSuccess: () => void;
@@ -15,6 +17,7 @@ interface Props {
 export const ParentPasswordModal: React.FC<Props> = ({
   onVerify,
   isSyncing = false,
+  notConfigured = false,
   onBiometric,
   onSuccess,
   onClose,
@@ -37,7 +40,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSyncing || checking) return;
+    if (isSyncing || notConfigured || checking) return;
 
     setChecking(true);
     const ok = await onVerify(password);
@@ -147,7 +150,16 @@ export const ParentPasswordModal: React.FC<Props> = ({
               </p>
             )}
 
-            {error && !isSyncing && (
+            {notConfigured && !isSyncing && (
+              <p className="text-xs text-amber-700 flex items-start gap-1 mt-1">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>
+                  試算表「使用者資料與餘額」中 ADM 的密碼欄是空的，請先在試算表填入密碼，再回來按重新整理。
+                </span>
+              </p>
+            )}
+
+            {error && !isSyncing && !notConfigured && (
               <p className="text-xs text-rose-600 flex items-center gap-1 mt-1 animate-in fade-in">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
                 密碼錯誤，請重新輸入
@@ -165,7 +177,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
             </button>
             <button
               type="submit"
-              disabled={isSyncing || checking}
+              disabled={isSyncing || notConfigured || checking}
               className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold shadow-md shadow-orange-500/20 active:scale-95 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:active:scale-100"
             >
               <Check className="w-4 h-4" />

@@ -163,7 +163,7 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
 | `addLog`（省略時的預設） | 新增一筆點數異動，並同步更新使用者餘額 | **是**（以 `logId` 去重） |
 | `addTask` | 新增任務項目，編號由伺服器接續產生 | **否** |
 | `updateLog` | 依 `logId` 修改既有紀錄的 `timestamp` / `taskName` / `note` | 是 |
-| `updatePassword` | 更新 ADM 的密碼 | 是 |
+| `updatePassword` | 更新 ADM 的密碼（需 `oldPassword`、`newPassword`） | 是（已是新密碼時直接回成功） |
 | `recalculate` | 以存摺為準重算所有餘額，可帶 `dryRun` | 是 |
 | `registerDevice` | 登記一支受信任裝置（需 `password`、`credentialId`、`label`） | 是 |
 | `removeDevice` | 移除受信任裝置（需 `password`、`credentialId`） | 是 |
@@ -205,6 +205,7 @@ curl -sk -L --data-binary @payload.json \
 - **餘額由伺服器計算**（讀試算表現值 + 異動量），不採用前端送來的 `newBalance`。
 - **所有寫入包在 `LockService` 內**，確保「讀現值 → 判斷 → 寫回」不可分割。
 - **裝置登記／移除一律在伺服器驗家長密碼**，空密碼直接拒絕。否則任何人直接打 API 就能佔滿兩個名額，或把家長的手機踢掉。
+- **改密碼也要在伺服器驗目前密碼**（`oldPassword`），否則知道 exec 網址就能改掉家長密碼。試算表密碼欄為空時一律拒絕，第一組密碼只能直接在試算表填。
 - **名額上限由伺服器把關**（`MAX_TRUSTED_DEVICES = 2`）；重複登記同一個 `credentialId` 只更新名稱，不佔用新名額。
 - 兩支裝置都遺失時，在 Apps Script 編輯器執行 `resetTrustedDevices()` 清空名單。密碼登入不受影響，不會被鎖在外面。
 
@@ -222,6 +223,7 @@ curl -sk -L --data-binary @payload.json \
 | 週的定義 | 前後端各一份 | 前端 `getWeekRange()`、後端 `weekRange_()`，皆為「週日 00:00 起、下週日 00:00 止」，邏輯必須一致 |
 
 **時區**：Apps Script 專案時區必須與試算表時區相同（目前為 `Asia/Taipei`），否則週的分界會偏移數小時。
+前端**不用瀏覽器時區**：週區間、補登日期、寫入試算表的時間、明細顯示一律以固定 UTC+8 計算（`sheetData.ts` 的台北時間段落），手機時區設錯或出國時才不會與後端對不上。
 
 ---
 
@@ -244,7 +246,8 @@ curl -sk -L --data-binary @payload.json \
 | `vite.config.ts` 使用 `__dirname` | 目前只是警告，未來 Vite 版本會不支援 | 改用 `import.meta.dirname` |
 | 倉庫未納入 lock 檔 | 不同時間安裝可能取得不同的相依版本 | 若需可重現的建置，在部署環境提交該環境產生的 lock 檔 |
 | 家長密碼僅前端驗證 | 明碼寫在 bundle 與試算表，開 DevTools 即可看到 | 定位是「防小孩誤按」，**不是安全機制**。不要用它保護真正敏感的東西 |
-| 寫入失敗時的網路錯誤會走 `no-cors` 後備 | 該路徑讀不到回應，無法判斷成功與否 | 標為 `confirmed: false`，前端改去試算表核對該筆 `logId` 是否存在，不直接當成功 |
+| 寫入時的網路錯誤無法判斷是否已寫入 | 回應可能在回程遺失，但資料常常已經寫進去 | **不重送**（addLog / addTask 非冪等）。addLog 標為 `confirmed: false`，前端回讀試算表核對該筆 `logId`；addTask 回報「無法確認」請使用者先重新整理 |
+| 試算表 ADM 密碼欄為空時無法進入家長區 | 沒有內建預設密碼可用 | 刻意的：預設密碼寫在前端等於人人都知道。到試算表填入密碼後重新整理即可 |
 | 指紋解鎖不做密碼學驗證 | WebAuthn 的簽章沒有送回伺服器檢查，開 DevTools 可繞過 | 與密碼同級的「防小孩」機制。名額上限與名單本身是伺服器把關的，那部分繞不過 |
 | `trustedDevices` 在 doGet 公開回傳 | 任何人打 exec 網址都看得到裝置標籤與 credentialId | 實害有限（沒有私鑰按不出指紋）。要收斂的話，改成只回「這台在不在名單上」，完整名單驗密碼才給 |
 | 登記被伺服器拒絕時，手機裡的 passkey 無法刪除 | WebAuthn 沒有提供刪除 API，只能由使用者自行到密碼管理員清 | 送出前先用已載入的名單檢查名額，縮小發生窗口。**不可以改成先查伺服器再建憑證** —— `credentials.create` 需要使用者手勢，中間插入網路請求會讓指紋視窗叫不出來 |

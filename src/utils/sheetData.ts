@@ -53,7 +53,8 @@ export function parseCleanUsers(rawUsers?: RawUser[]): CleanUser[] {
   if (!Array.isArray(rawUsers) || rawUsers.length === 0) {
     return [
       ...INITIAL_USERS_SEED,
-      { id: 'ADM', name: '家長', grade: '', currentPoints: 0, password: '77777777', isAdmin: true },
+      // 不給密碼：讀不到試算表時寧可無法解鎖，也不要有一組人人都知道的萬用密碼
+      { id: 'ADM', name: '家長', grade: '', currentPoints: 0, isAdmin: true },
     ];
   }
 
@@ -74,7 +75,9 @@ export function parseCleanUsers(rawUsers?: RawUser[]): CleanUser[] {
 
     const rawPassword = u['密碼'] ?? u.Password ?? '';
     const password = rawPassword !== '' && rawPassword !== null && rawPassword !== undefined ? String(rawPassword).trim() : undefined;
-    const isAdmin = id.toUpperCase() === 'ADM' || name === '家長' || !!password;
+    // 只認身分，不看「有沒有填密碼」—— 孩子那列的密碼欄被誤填時，
+    // 那個孩子會被當成家長，從小孩區與登記名單上消失。
+    const isAdmin = id.toUpperCase() === 'ADM' || name === '家長';
 
     return {
       id,
@@ -88,14 +91,21 @@ export function parseCleanUsers(rawUsers?: RawUser[]): CleanUser[] {
   });
 }
 
+export const PARENT_PASSWORD_OVERRIDE_KEY = 'weekend_points_parent_password';
+
+/**
+ * 目前生效的家長密碼。回傳空字串代表「沒有設定」——
+ * 呼叫端必須把它當成無法解鎖，而不是退回某組內建的預設值：
+ * 預設值寫在前端程式碼裡，等於人人都知道。
+ */
 export function getParentPassword(sheetPassword?: string): string {
   try {
-    const local = localStorage.getItem('weekend_points_parent_password');
+    const local = localStorage.getItem(PARENT_PASSWORD_OVERRIDE_KEY);
     if (local && local.trim() !== '') return local.trim();
   } catch {
     // ignore
   }
-  return (sheetPassword && sheetPassword.trim()) ? sheetPassword.trim() : '77777777';
+  return sheetPassword ? sheetPassword.trim() : '';
 }
 
 /* ─────────────── 家長密碼的本機雜湊 ───────────────
@@ -141,9 +151,21 @@ export function saveCachedPasswordHash(hash: string) {
   }
 }
 
-export function setParentPassword(newPassword: string): void {
+export function clearCachedPasswordHash() {
   try {
-    localStorage.setItem('weekend_points_parent_password', newPassword.trim());
+    localStorage.removeItem(PASSWORD_HASH_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * 舊版改密碼會在本機另存一份明文 override，而且優先於試算表。
+ * 現在改密碼一律先寫進試算表，不再產生 override；這裡只負責清掉舊版留下的。
+ */
+export function clearParentPasswordOverride(): void {
+  try {
+    localStorage.removeItem(PARENT_PASSWORD_OVERRIDE_KEY);
   } catch {
     // ignore
   }
@@ -161,10 +183,11 @@ export function parseCleanRecords(rawRecords?: RawRecord[], users?: CleanUser[])
   }
 
   return rawRecords.map((r, index) => {
-    const id = String(r.LogID || r.RecordID || r.ID || `R${Date.now()}-${index}`).trim();
-    const timestamp = String(
-      r['Timestamp (時間戳記)'] || r['Timestamp (時間)'] || r.Timestamp || r.Date || new Date().toISOString()
-    );
+    const rawTimestamp = r['Timestamp (時間戳記)'] || r['Timestamp (時間)'] || r.Timestamp || r.Date;
+    // 沒有 LogID 時的後備 id 必須每次解析都一樣，不能用 Date.now() ——
+    // 否則每次重新載入同一筆資料的 React key 都會變，整個列表跟著重掛載。
+    const id = String(r.LogID || r.RecordID || r.ID || `R${index}-${rawTimestamp ?? ''}`).trim();
+    const timestamp = String(rawTimestamp || new Date().toISOString());
     const userId = String(r['UserID (對象)'] || r['UserID (使用者ID)'] || r.UserID || '').trim();
     const userName = String(
       r['Name (姓名)'] || r.Name || (userId && userNameMap[userId] ? userNameMap[userId] : '')
@@ -605,25 +628,78 @@ export function clearLocalData() {
     localStorage.removeItem(STORAGE_KEY_TASKS_CACHE);
     localStorage.removeItem(STORAGE_KEY_USERS_CACHE);
     localStorage.removeItem(PASSWORD_HASH_KEY);
+    // 明文的自訂密碼也要清：只清雜湊的話，解鎖仍會沿用這組舊密碼
+    localStorage.removeItem(PARENT_PASSWORD_OVERRIDE_KEY);
   } catch {
     // ignore
   }
 }
 
-/* ─────────────── 週結算區間（星期日 ~ 星期六） ─────────────── */
+/* ─────────────── 台北時間 ───────────────
+ * 日期邊界一律以台北時間計算，不用瀏覽器時區 ——
+ * 後端（Apps Script，時區 Asia/Taipei）也是這樣切「本週」的。
+ * 手機時區若不是台北（出國、或系統設定跑掉），用本機時區算會與後端差好幾個小時，
+ * 本週明細就會多列或漏列，補登的日期也會差一天。
+ */
 
-export interface WeekRange {
-  start: Date;  // 星期日 00:00:00
-  end: Date;    // 下個星期日 00:00:00（不含）
+// 台灣沒有日光節約時間，固定 UTC+8，不需要時區資料庫
+const TAIPEI_OFFSET_MS = 8 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+/** 某個時刻在台北的年月日時分秒（month 為 1~12，weekday 0 = 星期日） */
+export function taipeiParts(d: Date = new Date()) {
+  const t = new Date(d.getTime() + TAIPEI_OFFSET_MS);
+  return {
+    year: t.getUTCFullYear(),
+    month: t.getUTCMonth() + 1,
+    day: t.getUTCDate(),
+    hours: t.getUTCHours(),
+    minutes: t.getUTCMinutes(),
+    seconds: t.getUTCSeconds(),
+    weekday: t.getUTCDay(),
+  };
 }
 
-/** 取得 ref 所屬那一週的區間，以本機時區的星期日為起點 */
+/** 台北時間的年月日時分秒所對應的時刻（month 為 1~12；day 超出範圍會自動進退位） */
+export function fromTaipei(year: number, month: number, day: number, h = 0, m = 0, s = 0): Date {
+  return new Date(Date.UTC(year, month - 1, day, h, m, s) - TAIPEI_OFFSET_MS);
+}
+
+/** 台北的今天，格式 YYYY-MM-DD（date input 需要） */
+export function todayTaipeiISO(): string {
+  const p = taipeiParts();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
+/**
+ * 解析試算表的時間。
+ * 儲存格是日期格式時，伺服器回傳 ISO 字串（帶時區，直接解析即可）；
+ * 是純文字時則是「2026/09/23 16:05:08」這種不帶時區的寫法 —— 那是台北時間，
+ * 交給 new Date() 會被當成瀏覽器時區。
+ */
+export function parseSheetTime(raw: string): Date {
+  const m = String(raw)
+    .trim()
+    .match(/^(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (m) {
+    return fromTaipei(+m[1], +m[2], +m[3], +(m[4] ?? 0), +(m[5] ?? 0), +(m[6] ?? 0));
+  }
+  return new Date(raw);
+}
+
+/* ─────────────── 週結算區間（星期日 ~ 星期六，台北時間） ─────────────── */
+
+export interface WeekRange {
+  start: Date;  // 台北時間星期日 00:00:00
+  end: Date;    // 台北時間下個星期日 00:00:00（不含）
+}
+
+/** 取得 ref 所屬那一週的區間，以台北時間的星期日為起點（與後端 weekRange_() 一致） */
 export function getWeekRange(ref: Date = new Date()): WeekRange {
-  const start = new Date(ref);
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - start.getDay()); // getDay(): 0 = 星期日
-  const end = new Date(start);
-  end.setDate(end.getDate() + 7);
+  const p = taipeiParts(ref);
+  const start = fromTaipei(p.year, p.month, p.day - p.weekday);
+  const end = new Date(start.getTime() + 7 * DAY_MS);
   return { start, end };
 }
 
@@ -632,17 +708,18 @@ export function getWeekRange(ref: Date = new Date()): WeekRange {
  * 時間格式無法解析時一律保留 —— 寧可多顯示，也不要讓資料悄悄消失。
  */
 export function isInWeek(timestamp: string, range: WeekRange): boolean {
-  const t = new Date(timestamp).getTime();
+  const t = parseSheetTime(timestamp).getTime();
   if (isNaN(t)) return true;
   return t >= range.start.getTime() && t < range.end.getTime();
 }
 
 /** 顯示用標籤，例如：9/21（日）– 9/27（六） */
 export function formatWeekLabel(range: WeekRange): string {
-  const last = new Date(range.end);
-  last.setDate(last.getDate() - 1);
-  const f = (d: Date) => `${d.getMonth() + 1}/${d.getDate()}`;
-  return `${f(range.start)}（日）– ${f(last)}（六）`;
+  const f = (d: Date) => {
+    const p = taipeiParts(d);
+    return `${p.month}/${p.day}`;
+  };
+  return `${f(range.start)}（日）– ${f(new Date(range.end.getTime() - DAY_MS))}（六）`;
 }
 
 // Convert points to weekend screen time (default rule based on T05: 10 points = 30 min, meaning 1 point = 3 minutes)
@@ -722,10 +799,12 @@ export async function writeRecordToGoogleSheet(
 ): Promise<WriteRecordResult> {
   const apiUrl = getStoredApiUrl();
   const dateObj = record.timestamp ? new Date(record.timestamp) : new Date();
-  
-  // Format as YYYY/MM/DD HH:mm:ss
+
+  // 格式 YYYY/MM/DD HH:mm:ss。試算表與後端都是台北時間，這裡也必須用台北時間寫，
+  // 不能用瀏覽器時區 —— 否則手機時區不對時，這筆會被歸到錯的日期甚至錯的週。
   const pad = (n: number) => String(n).padStart(2, '0');
-  const formattedTime = `${dateObj.getFullYear()}/${pad(dateObj.getMonth() + 1)}/${pad(dateObj.getDate())} ${pad(dateObj.getHours())}:${pad(dateObj.getMinutes())}:${pad(dateObj.getSeconds())}`;
+  const tp = taipeiParts(isNaN(dateObj.getTime()) ? new Date() : dateObj);
+  const formattedTime = `${tp.year}/${pad(tp.month)}/${pad(tp.day)} ${pad(tp.hours)}:${pad(tp.minutes)}:${pad(tp.seconds)}`;
 
   const payload = {
     action: 'addLog',
@@ -790,78 +869,67 @@ export async function writeRecordToGoogleSheet(
 
     return { success: true, confirmed: false };
   } catch (err: unknown) {
-    // 連線層失敗：改用 no-cors 再送一次。這條路讀不到回應，所以一律標為不確定。
-    try {
-      await fetch(apiUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        body: JSON.stringify(payload),
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
-      });
-      return { success: true, confirmed: false };
-    } catch {
-      const errorMsg = err instanceof Error ? err.message : '連線失敗';
-      return { success: false, confirmed: false, message: errorMsg };
-    }
+    // 連線層失敗時**不重送**。第一次請求可能已經寫進去、只是回應在回程遺失，
+    // 而 addLog 不是冪等的 —— 重送就是重複紀錄＋重複計分。
+    // （伺服器雖然會用 LogID 去重，但那要新版 GAS 有部署才生效，前端不該賭這個。）
+    // 回報「不確定」，交給呼叫端依 logId 回讀試算表核對實際結果。
+    const errorMsg = err instanceof Error ? err.message : '連線失敗';
+    return { success: false, confirmed: false, message: errorMsg };
   }
 }
 
 /**
- * Updates the parent password in Google Sheet (ADM row in '使用者資料與餘額')
+ * 把家長密碼寫進試算表（使用者資料與餘額 → ADM 那列）。
+ *
+ * **只有伺服器明確回覆 success 才算成功**，其餘（回應遺失、不是 JSON、伺服器回報錯誤）
+ * 一律回失敗 —— 否則本機與試算表的密碼會無聲分叉。
+ * 寫同一組密碼幾次結果都一樣（冪等），所以回應遺失時可以安全重試。
+ *
+ * 伺服器會驗 oldPassword，否則任何人直接打 API 就能改掉家長密碼。
  */
 export async function updateParentPasswordInGoogleSheet(
-  newPassword: string
+  newPassword: string,
+  oldPassword: string
 ): Promise<{ success: boolean; message?: string }> {
-  const apiUrl = getStoredApiUrl();
   const payload = {
     action: 'updatePassword',
     userId: 'ADM',
     newPassword: newPassword,
+    oldPassword: oldPassword,
   };
 
-  try {
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      body: JSON.stringify(payload),
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
-      redirect: 'follow',
-    });
-
-    const responseText = await response.text();
+  const ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
     try {
-      const json = JSON.parse(responseText);
-      if (json.status === 'success' || json.success) {
+      const response = await fetch(getStoredApiUrl(), {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+        redirect: 'follow',
+      });
+      const json = JSON.parse(await response.text());
+
+      if (json.status === 'success' || json.success === true) {
         return { success: true, message: 'Google Sheet 密碼已同步更新！' };
       }
+      // 伺服器明確拒絕，重試也不會變，直接回報
+      return { success: false, message: String(json.message || '試算表拒絕更新密碼') };
     } catch {
-      if (response.ok) {
-        return { success: true };
+      if (attempt === ATTEMPTS) {
+        return { success: false, message: `無法確認試算表已更新（已重試 ${ATTEMPTS} 次），請稍後再試` };
       }
-    }
-    return { success: true };
-  } catch (err: unknown) {
-    try {
-      await fetch(apiUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        body: JSON.stringify(payload),
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
-      });
-      return { success: true };
-    } catch (e2: unknown) {
-      return { success: false, message: '同步更新至 Google Sheet 失敗' };
+      await new Promise((r) => setTimeout(r, 400 * attempt));
     }
   }
+  return { success: false, message: '同步更新至 Google Sheet 失敗' };
 }
 
 /**
- * Adds a new custom task to the '任務與配分表' sheet
+ * 新增自訂項目到「任務與配分表」。
+ *
+ * 只有伺服器明確回覆 success 才算成功。
+ * addTask 不是冪等的（每次都會編一個新號碼），所以**不重送**：
+ * 回應遺失時回報「無法確認」，請使用者重新整理看一下，而不是再按一次產生重複項目。
  */
 export async function addNewTaskToGoogleSheet(task: {
   category: string;
@@ -869,7 +937,6 @@ export async function addNewTaskToGoogleSheet(task: {
   points: number;
   note?: string;
 }): Promise<{ success: boolean; taskId?: string; message?: string }> {
-  const apiUrl = getStoredApiUrl();
   // 不在前端編號：前端不知道試算表現在編到幾號，一律由伺服器接續產生
   const payload = {
     action: 'addTask',
@@ -879,41 +946,36 @@ export async function addNewTaskToGoogleSheet(task: {
     note: task.note || '',
   };
 
+  let responseText: string;
   try {
-    const response = await fetch(apiUrl, {
+    const response = await fetch(getStoredApiUrl(), {
       method: 'POST',
       body: JSON.stringify(payload),
-      headers: {
-        'Content-Type': 'text/plain;charset=utf-8',
-      },
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
       redirect: 'follow',
     });
+    responseText = await response.text();
+  } catch {
+    return {
+      success: false,
+      message: '連線中斷，無法確認是否已新增。請先按重新整理確認，不要直接再送一次',
+    };
+  }
 
-    const responseText = await response.text();
-    try {
-      const json = JSON.parse(responseText);
-      if (json.status === 'success' || json.success) {
-        return { success: true, taskId: json.taskId, message: '自訂項目已新增至任務與配分表！' };
-      }
-    } catch {
-      if (response.ok) {
-        return { success: true };
-      }
+  try {
+    const json = JSON.parse(responseText);
+    if (json.status === 'success' || json.success === true) {
+      return {
+        success: true,
+        taskId: typeof json.taskId === 'string' ? json.taskId : undefined,
+        message: '自訂項目已新增至任務與配分表！',
+      };
     }
-    return { success: true };
-  } catch (err: unknown) {
-    try {
-      await fetch(apiUrl, {
-        method: 'POST',
-        mode: 'no-cors',
-        body: JSON.stringify(payload),
-        headers: {
-          'Content-Type': 'text/plain;charset=utf-8',
-        },
-      });
-      return { success: true };
-    } catch (e2: unknown) {
-      return { success: false, message: '同步新增至 Google Sheet 失敗' };
-    }
+    return { success: false, message: String(json.message || '試算表拒絕新增項目') };
+  } catch {
+    return {
+      success: false,
+      message: '收到無法辨識的回應，無法確認是否已新增。請先按重新整理確認，不要直接再送一次',
+    };
   }
 }

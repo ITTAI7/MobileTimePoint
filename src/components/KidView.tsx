@@ -1,6 +1,14 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { CleanUser, CleanRecord, CleanTask } from '../types';
-import { pointsToTime, getMinutesPerPoint, getWeekRange, isInWeek, formatWeekLabel } from '../utils/sheetData';
+import {
+  pointsToTime,
+  getMinutesPerPoint,
+  getWeekRange,
+  isInWeek,
+  formatWeekLabel,
+  parseSheetTime,
+  taipeiParts,
+} from '../utils/sheetData';
 import { 
   Sparkles, 
   Smartphone, 
@@ -52,8 +60,23 @@ export const KidView: React.FC<Props> = ({
   const timeInfo = pointsToTime(currentUser.currentPoints, minutesPerPoint);
   const theme = themeOf(currentUser);
 
-  // 本週區間（星期日 ~ 星期六）
-  const week = useMemo(() => getWeekRange(), []);
+  // 本週區間（星期日 ~ 星期六）。
+  // 不能只在 mount 時算一次：App 跨過星期日午夜一直開著的話，標籤與明細會停在上一週。
+  // 每分鐘檢查一次；手機休眠時計時器會暫停，所以回到畫面時也要補查。
+  const [week, setWeek] = useState(() => getWeekRange());
+  useEffect(() => {
+    const refresh = () => {
+      const next = getWeekRange();
+      // 同一週就沿用原物件，避免無謂的重新繪製
+      setWeek((prev) => (prev.start.getTime() === next.start.getTime() ? prev : next));
+    };
+    const timer = setInterval(refresh, 60_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, []);
 
   // 「點數存摺」沒有類別欄，紀錄解析出來一律是「一般」。
   // 這裡回「任務與配分表」用任務名稱反查真正的類別，標籤與配色才有意義。
@@ -445,13 +468,14 @@ export const KidView: React.FC<Props> = ({
 
 function formatRecordTime(raw: string): string {
   try {
-    const d = new Date(raw);
+    // 顯示台北時間，與「本週」的切法一致 —— 否則手機時區不對時，
+    // 週日凌晨的紀錄會顯示成週六，看起來像被算錯週
+    const d = parseSheetTime(raw);
     if (isNaN(d.getTime())) return raw;
-    const month = d.getMonth() + 1;
-    const date = d.getDate();
-    const hours = d.getHours().toString().padStart(2, '0');
-    const minutes = d.getMinutes().toString().padStart(2, '0');
-    return `${month}/${date} ${hours}:${minutes}`;
+    const p = taipeiParts(d);
+    const hours = p.hours.toString().padStart(2, '0');
+    const minutes = p.minutes.toString().padStart(2, '0');
+    return `${p.month}/${p.day} ${hours}:${minutes}`;
   } catch {
     return raw;
   }

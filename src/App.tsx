@@ -15,6 +15,7 @@ import {
   hashPassword,
   getCachedPasswordHash,
   saveCachedPasswordHash,
+  clearCachedPasswordHash,
   writeRecordToGoogleSheet,
   addNewTaskToGoogleSheet,
   recalculateGoogleSheet,
@@ -22,6 +23,7 @@ import {
   removeTrustedDevice,
   getCachedTrustedDevices,
   saveCachedTrustedDevices,
+  parseSheetTime,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -218,7 +220,13 @@ export default function App() {
   // 只在資料確實同步過之後才存雜湊 ——
   // 否則連線失敗時 effectivePassword 會是內建預設值，存下去就把錯的密碼記起來了。
   useEffect(() => {
-    if (!hasFreshData || !effectivePassword) return;
+    if (!hasFreshData) return;
+    if (!effectivePassword) {
+      // 試算表把密碼清掉了：舊的雜湊也要作廢，否則離線時仍能用舊密碼解鎖
+      clearCachedPasswordHash();
+      setPasswordHash(null);
+      return;
+    }
     let cancelled = false;
     hashPassword(effectivePassword).then((h) => {
       if (cancelled || !h) return;
@@ -299,11 +307,10 @@ export default function App() {
       const mergedUsers = data.users.length > 0 ? data.users : INITIAL_USERS_SEED;
       setUsers(mergedUsers);
 
-      // Ensure effective password picks up any sheet changes
+      // 一律跟著試算表走：ADM 密碼欄若被清空，這裡也要變成「未設定」，
+      // 而不是沿用上一組（或某個內建預設值）
       const foundAdmin = mergedUsers.find((u) => u.isAdmin || u.id.toUpperCase() === 'ADM' || u.name === '家長');
-      if (foundAdmin?.password) {
-        setEffectivePassword(getParentPassword(foundAdmin.password));
-      }
+      setEffectivePassword(getParentPassword(foundAdmin?.password));
 
       // If selectedUserId is not in children, default to first child.
       // 這裡用 functional update 讀取目前選取的孩子，loadData 才不需要相依 selectedUserId
@@ -317,7 +324,7 @@ export default function App() {
 
       // Records: Directly sync with Google Sheet records (if sheet is cleared to empty, display empty records)
       const sortedRecords = [...data.records].sort(
-        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        (a, b) => parseSheetTime(b.timestamp).getTime() - parseSheetTime(a.timestamp).getTime()
       );
       setRecords(sortedRecords);
 
@@ -487,7 +494,7 @@ export default function App() {
       return { ok: false, message: res.message || '新增項目至試算表失敗' };
     }
 
-    // no-cors 後備路徑讀不到回應，拿不到伺服器編號時先用暫時 id，
+    // 舊版 GAS 可能不回傳編號，這時先用暫時 id，
     // 下次重新載入會被試算表的真實編號整份取代。
     const newTask: CleanTask = {
       id: res.taskId || `T-pending-${Date.now()}`,
@@ -532,6 +539,8 @@ export default function App() {
   // Reset Local Additions
   const handleResetLocalData = () => {
     clearLocalData();
+    // 本機自訂密碼已清掉，記憶體裡的也要跟著回到試算表那組
+    setEffectivePassword(getParentPassword(adminUser?.password));
     loadData(true);
   };
 
@@ -852,6 +861,8 @@ export default function App() {
           onVerify={verifyParentPassword}
           // 有本機雜湊就能立刻驗證；兩者皆無時才需要等連線
           isSyncing={!hasFreshData && !passwordHash}
+          // 試算表 ADM 密碼欄是空的：不給任何密碼通過，也不退回內建預設值
+          notConfigured={hasFreshData && !effectivePassword}
           // 只有「本機有憑證且伺服器名單也有」才給指紋，避免偽造 localStorage 繞過
           onBiometric={isThisDeviceTrusted ? verifyBiometric : undefined}
           onSuccess={handlePasswordSuccess}

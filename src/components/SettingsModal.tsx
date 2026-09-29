@@ -3,7 +3,8 @@ import {
   DEFAULT_GAS_API_URL,
   getStoredApiUrl,
   setStoredApiUrl,
-  setParentPassword,
+  clearParentPasswordOverride,
+  PARENT_PASSWORD_OVERRIDE_KEY,
   getParentPassword,
   updateParentPasswordInGoogleSheet,
 } from '../utils/sheetData';
@@ -89,7 +90,13 @@ export const SettingsModal: React.FC<Props> = ({
   };
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
 
-  const hasCustomPassword = Boolean(localStorage.getItem('weekend_points_parent_password'));
+  const hasCustomPassword = (() => {
+    try {
+      return Boolean(localStorage.getItem(PARENT_PASSWORD_OVERRIDE_KEY));
+    } catch {
+      return false;
+    }
+  })();
 
   const handleSaveUrl = (e: React.FormEvent) => {
     e.preventDefault();
@@ -137,19 +144,27 @@ export const SettingsModal: React.FC<Props> = ({
     const cleanNewPass = newPassword.trim();
     setIsUpdatingPassword(true);
 
-    // 1. Save locally
-    setParentPassword(cleanNewPass);
-    if (onPasswordChanged) {
-      onPasswordChanged(cleanNewPass);
-    }
-
-    // 2. Synchronize to Google Sheet
+    // 先寫試算表，確認成功才改本機 —— 反過來做的話，同步失敗時
+    // 這台用新密碼、其他裝置與試算表還是舊密碼，而且畫面還會顯示成功。
+    let res: { success: boolean; message?: string };
     try {
-      await updateParentPasswordInGoogleSheet(cleanNewPass);
+      res = await updateParentPasswordInGoogleSheet(cleanNewPass, oldPassword.trim());
     } catch {
-      // ignore
+      res = { success: false };
     } finally {
       setIsUpdatingPassword(false);
+    }
+
+    if (!res.success) {
+      setPasswordError(`密碼沒有變更：${res.message || '無法同步到試算表'}`);
+      return;
+    }
+
+    // 試算表已經是新密碼了，本機不需要再留一份自訂密碼 ——
+    // 留著的話，之後別台裝置改密碼，這台會一直卡在這組舊的。
+    clearParentPasswordOverride();
+    if (onPasswordChanged) {
+      onPasswordChanged(cleanNewPass);
     }
 
     setPasswordSuccess(true);
@@ -187,11 +202,7 @@ export const SettingsModal: React.FC<Props> = ({
     if (!confirm('確定要清除本機自訂密碼，改用試算表「使用者資料與餘額」中 ADM 的密碼嗎？')) {
       return;
     }
-    try {
-      localStorage.removeItem('weekend_points_parent_password');
-    } catch {
-      // ignore
-    }
+    clearParentPasswordOverride();
     setPasswordError(null);
     if (onPasswordChanged) onPasswordChanged(sheetAdminPassword);
     setPasswordSuccess(true);

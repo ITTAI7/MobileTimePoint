@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import { CleanUser, CleanTask, CleanRecord } from '../types';
+import { taipeiParts, fromTaipei, todayTaipeiISO, getWeekRange } from '../utils/sheetData';
 import {
   Check,
   Plus,
@@ -29,34 +30,26 @@ interface Props {
   isWritingToSheet?: boolean;
 }
 
-/** 本機時區的今天，格式 YYYY-MM-DD（date input 需要） */
-function todayLocalISO(): string {
-  const d = new Date();
-  const p = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
-}
+// 日期一律以台北時間解讀，與試算表、後端的「本週」一致（見 sheetData 的台北時間段落）
 
 /**
- * 把 date input 的 YYYY-MM-DD 轉成完整時間戳。
- * 時分秒沿用當下的時鐘 —— 補登時連續登記多筆才會保持先後順序。
+ * 把 date input 的 YYYY-MM-DD（台北日期）轉成完整時間戳。
+ * 時分秒沿用當下的台北時鐘 —— 補登時連續登記多筆才會保持先後順序。
  */
 function toTimestamp(dateStr: string): string {
   const now = new Date();
   const [y, m, d] = dateStr.split('-').map(Number);
   if (!y || !m || !d) return now.toISOString();
-  return new Date(y, m - 1, d, now.getHours(), now.getMinutes(), now.getSeconds()).toISOString();
+  const t = taipeiParts(now);
+  return fromTaipei(y, m, d, t.hours, t.minutes, t.seconds).toISOString();
 }
 
 /** 這個日期是否落在本週（星期日~星期六）—— 不在的話不會出現在小孩區的本週明細 */
 function isThisWeek(dateStr: string): boolean {
   const [y, m, d] = dateStr.split('-').map(Number);
   if (!y || !m || !d) return true;
-  const target = new Date(y, m - 1, d).getTime();
-  const start = new Date();
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - start.getDay());
-  const end = new Date(start);
-  end.setDate(end.getDate() + 7);
+  const target = fromTaipei(y, m, d).getTime();
+  const { start, end } = getWeekRange();
   return target >= start.getTime() && target < end.getTime();
 }
 
@@ -112,7 +105,7 @@ export const ParentView: React.FC<Props> = ({
   const [saveCustomToTaskList, setSaveCustomToTaskList] = useState(true);
   const [pointsChange, setPointsChange] = useState<number>(parentTasks[0]?.points || 2);
   const [note, setNote] = useState('');
-  const [recordDate, setRecordDate] = useState<string>(todayLocalISO());
+  const [recordDate, setRecordDate] = useState<string>(todayTaipeiISO());
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
@@ -492,12 +485,12 @@ export const ParentView: React.FC<Props> = ({
           <input
             type="date"
             value={recordDate}
-            max={todayLocalISO()}
-            onChange={(e) => setRecordDate(e.target.value || todayLocalISO())}
+            max={todayTaipeiISO()}
+            onChange={(e) => setRecordDate(e.target.value || todayTaipeiISO())}
             className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white focus:outline-none"
           />
 
-          {recordDate !== todayLocalISO() && (
+          {recordDate !== todayTaipeiISO() && (
             <div className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-[11px] text-blue-900">
               <p className="font-semibold">補登過去的紀錄</p>
               {!isThisWeek(recordDate) && (
