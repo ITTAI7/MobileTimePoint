@@ -19,7 +19,8 @@ import {
   Award,
   Filter,
   CheckCircle2,
-  Calendar
+  Calendar,
+  MessageSquareText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -64,11 +65,14 @@ export const KidView: React.FC<Props> = ({
   // 不能只在 mount 時算一次：App 跨過星期日午夜一直開著的話，標籤與明細會停在上一週。
   // 每分鐘檢查一次；手機休眠時計時器會暫停，所以回到畫面時也要補查。
   const [week, setWeek] = useState(() => getWeekRange());
+  // 「今天／昨天」的標籤同理，跨過午夜要跟著換
+  const [todayKey, setTodayKey] = useState(() => dayKeyOf(new Date()));
   useEffect(() => {
     const refresh = () => {
       const next = getWeekRange();
       // 同一週就沿用原物件，避免無謂的重新繪製
       setWeek((prev) => (prev.start.getTime() === next.start.getTime() ? prev : next));
+      setTodayKey(dayKeyOf(new Date()));
     };
     const timer = setInterval(refresh, 60_000);
     document.addEventListener('visibilitychange', refresh);
@@ -109,6 +113,10 @@ export const KidView: React.FC<Props> = ({
     if (filterType === 'minus') return r.points < 0;
     return true;
   });
+
+  // 依台北日期分組：小孩先看到「哪一天」，再看當天做了什麼
+  const dayGroups = groupByDay(filteredRecords);
+  const yesterdayKey = dayKeyOf(new Date(Date.now() - 86_400_000));
 
   // 兌換方案全部來自試算表的「兌換項目」，由便宜到貴排序。
   // 以後在配分表新增或調整兌換方案，畫面自動跟著變，不用改程式。
@@ -262,7 +270,9 @@ export const KidView: React.FC<Props> = ({
                 >
                   {currentUser.currentPoints >= nextMilestone
                     ? '現在就可以兌換'
-                    : `再 ${pointsNeededForNext} 點滿一段`}
+                    : cheapest
+                    ? `再 ${pointsNeededForNext} 點可換 ${shortRedeemLabel(cheapest.name)}`
+                    : `再 ${pointsNeededForNext} 點`}
                 </span>
               </div>
               <div className="w-full h-2 rounded-full bg-white/20 overflow-hidden">
@@ -368,7 +378,7 @@ export const KidView: React.FC<Props> = ({
         </div>
 
         {/* Records List */}
-        <div className="mt-3 divide-y divide-slate-100">
+        <div className="mt-4 flex flex-col gap-3">
           {filteredRecords.length === 0 ? (
             <div className="py-10 text-center">
               <div className="w-12 h-12 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-2">
@@ -380,81 +390,140 @@ export const KidView: React.FC<Props> = ({
               </p>
             </div>
           ) : (
-            filteredRecords.map((record) => {
-              const category = resolveCategory(record);
-              // 兌換是開心的事（換到手機時間），不該跟扣分共用負面的紅色下箭頭
-              const isRedeem = category.includes('兌換');
-              const isPositive = record.points > 0;
-              const formattedDate = formatRecordTime(record.timestamp);
+            dayGroups.map((group) => {
+              const isToday = group.key === todayKey;
+              const relLabel = isToday ? '今天' : group.key === yesterdayKey ? '昨天' : '';
+              const dayTotal = group.records.reduce((sum, r) => sum + r.points, 0);
 
               return (
-                <div key={record.id} className="py-3 flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 min-w-0">
-                    <div
-                      className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
-                        isRedeem
-                          ? 'bg-purple-50 text-purple-600'
-                          : isPositive
-                          ? 'bg-emerald-50 text-emerald-600'
-                          : 'bg-rose-50 text-rose-600'
-                      }`}
-                    >
-                      {isRedeem ? (
-                        <Smartphone className="w-5 h-5" />
-                      ) : isPositive ? (
-                        <ArrowUpRight className="w-5 h-5" />
-                      ) : (
-                        <ArrowDownRight className="w-5 h-5" />
-                      )}
-                    </div>
-
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="font-semibold text-slate-800 text-sm truncate">
-                          {record.taskName}
-                        </span>
+                <div
+                  key={group.key}
+                  className={`rounded-2xl border px-3.5 pt-3 pb-1 ${
+                    isToday ? 'bg-blue-50/70 border-blue-100' : 'bg-slate-50 border-slate-100'
+                  }`}
+                >
+                  <div
+                    className={`flex items-center justify-between gap-2 pb-2 border-b ${
+                      isToday ? 'border-blue-100' : 'border-slate-200/70'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-xl font-bold text-slate-800 leading-none tabular-nums">
+                        {group.label}
+                      </span>
+                      {group.weekday !== undefined && (
                         <span
-                          className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${getCategoryBadgeColor(
-                            category
+                          className={`text-xs font-semibold px-2 py-0.5 rounded-full ${weekdayChipColor(
+                            group.weekday
                           )}`}
                         >
-                          {category}
+                          週{WEEKDAY_NAMES[group.weekday]}
                         </span>
-                        {record.isLocal && (
-                          <span className="text-[10px] bg-slate-100 text-slate-500 px-1 rounded">
-                            剛建立
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center gap-2 text-xs text-slate-400 mt-0.5">
-                        <span>{formattedDate}</span>
-                        {record.note && (
-                          <>
-                            <span>·</span>
-                            <span className="italic truncate">{record.note}</span>
-                          </>
-                        )}
-                      </div>
+                      )}
+                      {relLabel && (
+                        <span
+                          className={`text-xs font-semibold ${
+                            isToday ? 'text-blue-600' : 'text-slate-500'
+                          }`}
+                        >
+                          {relLabel}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 text-xs text-slate-400 shrink-0">
+                      <span>{group.records.length} 筆</span>
+                      <span>·</span>
+                      <span
+                        className={`text-sm font-bold tabular-nums ${
+                          dayTotal >= 0 ? 'text-emerald-600' : 'text-rose-600'
+                        }`}
+                      >
+                        {dayTotal > 0 ? `+${dayTotal}` : dayTotal} 點
+                      </span>
                     </div>
                   </div>
 
-                  <div className="text-right shrink-0">
-                    <div
-                      className={`text-base font-bold font-mono ${
-                        isRedeem
-                          ? 'text-purple-600'
-                          : isPositive
-                          ? 'text-emerald-600'
-                          : 'text-rose-600'
-                      }`}
-                    >
-                      {isPositive ? `+${record.points}` : record.points} 點
-                    </div>
-                    {record.balanceAfter !== undefined && (
-                      <div className="text-[11px] text-slate-400">
-                        餘額 {record.balanceAfter}
-                      </div>
-                    )}
+                  <div className="divide-y divide-slate-200/60">
+                    {group.records.map((record) => {
+                      const category = resolveCategory(record);
+                      // 兌換是開心的事（換到手機時間），不該跟扣分共用負面的紅色下箭頭
+                      const isRedeem = category.includes('兌換');
+                      const isPositive = record.points > 0;
+                      const formattedTime = formatRecordTime(record.timestamp);
+
+                      return (
+                        <div key={record.id} className="py-2.5 flex items-center justify-between gap-3">
+                          <div className="flex items-center gap-3 min-w-0">
+                            <div
+                              className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                                isRedeem
+                                  ? 'bg-purple-50 text-purple-600'
+                                  : isPositive
+                                  ? 'bg-emerald-50 text-emerald-600'
+                                  : 'bg-rose-50 text-rose-600'
+                              }`}
+                            >
+                              {isRedeem ? (
+                                <Smartphone className="w-5 h-5" />
+                              ) : isPositive ? (
+                                <ArrowUpRight className="w-5 h-5" />
+                              ) : (
+                                <ArrowDownRight className="w-5 h-5" />
+                              )}
+                            </div>
+
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-semibold text-slate-800 text-sm truncate">
+                                  {record.taskName}
+                                </span>
+                                <span
+                                  className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${getCategoryBadgeColor(
+                                    category
+                                  )}`}
+                                >
+                                  {category}
+                                </span>
+                                {record.isLocal && (
+                                  <span className="text-[10px] bg-slate-100 text-slate-500 px-1 rounded">
+                                    剛建立
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-400 mt-0.5 tabular-nums">
+                                {formattedTime}
+                              </div>
+                              {/* 有寫備註通常代表這筆很重要：獨立一行、醒目底色、完整顯示不截斷 */}
+                              {record.note && (
+                                <div className="mt-1.5 flex items-start gap-1.5 rounded-lg bg-amber-50 border border-amber-200/70 px-2 py-1.5 text-sm font-medium text-amber-900 leading-snug">
+                                  <MessageSquareText className="w-4 h-4 mt-0.5 shrink-0 text-amber-600" />
+                                  <span className="break-words min-w-0">{record.note}</span>
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          <div className="text-right shrink-0">
+                            <div
+                              className={`text-base font-bold font-mono ${
+                                isRedeem
+                                  ? 'text-purple-600'
+                                  : isPositive
+                                  ? 'text-emerald-600'
+                                  : 'text-rose-600'
+                              }`}
+                            >
+                              {isPositive ? `+${record.points}` : record.points} 點
+                            </div>
+                            {record.balanceAfter !== undefined && (
+                              <div className="text-[11px] text-slate-400">
+                                餘額 {record.balanceAfter}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               );
@@ -466,6 +535,7 @@ export const KidView: React.FC<Props> = ({
   );
 };
 
+/** 只顯示時間 —— 日期已經在分組標題上了 */
 function formatRecordTime(raw: string): string {
   try {
     // 顯示台北時間，與「本週」的切法一致 —— 否則手機時區不對時，
@@ -475,10 +545,59 @@ function formatRecordTime(raw: string): string {
     const p = taipeiParts(d);
     const hours = p.hours.toString().padStart(2, '0');
     const minutes = p.minutes.toString().padStart(2, '0');
-    return `${p.month}/${p.day} ${hours}:${minutes}`;
+    return `${hours}:${minutes}`;
   } catch {
     return raw;
   }
+}
+
+const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
+
+/** 台北日期的分組鍵，例如 2026-9-28 */
+function dayKeyOf(d: Date): string {
+  const p = taipeiParts(d);
+  return `${p.year}-${p.month}-${p.day}`;
+}
+
+interface DayGroup {
+  key: string;
+  label: string;
+  weekday?: number;
+  records: CleanRecord[];
+}
+
+/**
+ * 依台北日期分組，保留原本的排列順序。
+ * 時間解析不了的紀錄集中到「日期不明」，不能讓它悄悄消失。
+ */
+function groupByDay(records: CleanRecord[]): DayGroup[] {
+  const groups = new Map<string, DayGroup>();
+  records.forEach((r) => {
+    const d = parseSheetTime(r.timestamp);
+    let key = 'unknown';
+    let label = '日期不明';
+    let weekday: number | undefined;
+    if (!isNaN(d.getTime())) {
+      const p = taipeiParts(d);
+      key = dayKeyOf(d);
+      label = `${p.month}/${p.day}`;
+      weekday = p.weekday;
+    }
+    let g = groups.get(key);
+    if (!g) {
+      g = { key, label, weekday, records: [] };
+      groups.set(key, g);
+    }
+    g.records.push(r);
+  });
+  return Array.from(groups.values());
+}
+
+/** 週六是兌換日（琥珀色）、週日玫瑰色，平日灰色 —— 一眼分出週末 */
+function weekdayChipColor(weekday: number): string {
+  if (weekday === 6) return 'bg-amber-100 text-amber-800';
+  if (weekday === 0) return 'bg-rose-100 text-rose-700';
+  return 'bg-slate-200/70 text-slate-600';
 }
 
 /**
