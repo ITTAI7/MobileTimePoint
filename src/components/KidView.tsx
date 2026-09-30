@@ -393,7 +393,6 @@ export const KidView: React.FC<Props> = ({
             dayGroups.map((group) => {
               const isToday = group.key === todayKey;
               const relLabel = isToday ? '今天' : group.key === yesterdayKey ? '昨天' : '';
-              const dayTotal = group.records.reduce((sum, r) => sum + r.points, 0);
 
               return (
                 <div
@@ -430,17 +429,9 @@ export const KidView: React.FC<Props> = ({
                         </span>
                       )}
                     </div>
-                    <div className="flex items-center gap-1.5 text-xs text-slate-400 shrink-0">
-                      <span>{group.records.length} 筆</span>
-                      <span>·</span>
-                      <span
-                        className={`text-sm font-bold tabular-nums ${
-                          dayTotal >= 0 ? 'text-emerald-600' : 'text-rose-600'
-                        }`}
-                      >
-                        {dayTotal > 0 ? `+${dayTotal}` : dayTotal} 點
-                      </span>
-                    </div>
+                    <span className="text-xs text-slate-400 shrink-0">
+                      {group.records.length} 筆
+                    </span>
                   </div>
 
                   <div className="divide-y divide-slate-200/60">
