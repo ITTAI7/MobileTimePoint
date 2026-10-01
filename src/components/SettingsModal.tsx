@@ -3,29 +3,24 @@ import {
   DEFAULT_GAS_API_URL,
   getStoredApiUrl,
   setStoredApiUrl,
-  clearParentPasswordOverride,
-  PARENT_PASSWORD_OVERRIDE_KEY,
-  getParentPassword,
   updateParentPasswordInGoogleSheet,
 } from '../utils/sheetData';
 import {
   X,
   Settings,
-  RefreshCw,
   Database,
   Check,
-  AlertCircle,
   Trash2,
   KeyRound,
   ShieldCheck,
   ShieldAlert,
-  RotateCcw,
   Loader2,
   Fingerprint,
   Info,
+  Lock,
 } from 'lucide-react';
 import { biometricDiagnostics } from '../utils/biometric';
-import { RawSheetResponse, RawUser, TrustedDevice } from '../types';
+import { TrustedDevice } from '../types';
 
 interface Props {
   onClose: () => void;
@@ -41,8 +36,15 @@ interface Props {
   isThisDeviceTrusted?: boolean;
   onRefreshData: () => void;
   onResetLocalData: () => void;
-  rawResponse?: RawSheetResponse | null;
-  currentPassword?: string;
+  /**
+   * 家長區是否已解鎖。沒解鎖時（例如小孩點了齒輪）不顯示改密碼、清除資料 ——
+   * 連線網址也不顯示，避免被改掉或拿去直接打 API。
+   */
+  isParentUnlocked?: boolean;
+  /** 是否顯示連線網址設定。App 在「這台根本無法驗證密碼」時也會開放，否則網址設錯就救不回來 */
+  allowConnectionSettings?: boolean;
+  /** 先在本機比對目前密碼，省一次連線；回 null 代表本機無從比對，交給伺服器 */
+  onCheckPassword?: (password: string) => boolean | null;
   onPasswordChanged?: (newPass: string) => void;
 }
 
@@ -57,15 +59,15 @@ export const SettingsModal: React.FC<Props> = ({
   isThisDeviceTrusted = false,
   onRefreshData,
   onResetLocalData,
-  rawResponse,
-  currentPassword,
+  isParentUnlocked = false,
+  allowConnectionSettings = false,
+  onCheckPassword,
   onPasswordChanged,
 }) => {
   const [apiUrl, setApiUrl] = useState(getStoredApiUrl());
   const [savedSuccess, setSavedSuccess] = useState(false);
 
   // Password Management States
-  const effectivePass = currentPassword || getParentPassword();
   const [isChangingPassword, setIsChangingPassword] = useState(false);
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -89,14 +91,6 @@ export const SettingsModal: React.FC<Props> = ({
     else setDeviceError(res.message || '登記失敗');
   };
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
-
-  const hasCustomPassword = (() => {
-    try {
-      return Boolean(localStorage.getItem(PARENT_PASSWORD_OVERRIDE_KEY));
-    } catch {
-      return false;
-    }
-  })();
 
   const handleSaveUrl = (e: React.FormEvent) => {
     e.preventDefault();
@@ -124,7 +118,8 @@ export const SettingsModal: React.FC<Props> = ({
     e.preventDefault();
     setPasswordError(null);
 
-    if (oldPassword.trim() !== effectivePass.trim()) {
+    // 本機能比對就先擋掉打錯的，省一次 3 秒的連線；比對不了就交給伺服器驗
+    if (onCheckPassword?.(oldPassword) === false) {
       setPasswordError('目前密碼不正確');
       return;
     }
@@ -160,9 +155,6 @@ export const SettingsModal: React.FC<Props> = ({
       return;
     }
 
-    // 試算表已經是新密碼了，本機不需要再留一份自訂密碼 ——
-    // 留著的話，之後別台裝置改密碼，這台會一直卡在這組舊的。
-    clearParentPasswordOverride();
     if (onPasswordChanged) {
       onPasswordChanged(cleanNewPass);
     }
@@ -175,41 +167,6 @@ export const SettingsModal: React.FC<Props> = ({
       setPasswordSuccess(false);
       setIsChangingPassword(false);
     }, 1800);
-  };
-
-  /** 試算表裡 ADM 那列目前的密碼；讀不到回 null */
-  const sheetAdminPassword = (() => {
-    const rows = rawResponse?.['使用者資料與餘額'] as RawUser[] | undefined;
-    if (!Array.isArray(rows)) return null;
-    const adm = rows.find((u) => String(u.UserID ?? '').trim().toUpperCase() === 'ADM');
-    if (!adm) return null;
-    const pw = String(adm['密碼'] ?? adm.Password ?? '').trim();
-    return pw === '' ? null : pw;
-  })();
-
-  /**
-   * 「還原試算表原始密碼」＝丟掉本機的自訂密碼，改用試算表現在寫的那組。
-   *
-   * 這裡**絕對不能回寫試算表**。舊版寫成 getParentPassword() 不帶參數，
-   * 在本機 override 剛被清掉的情況下會回傳寫死的預設值，再把那個預設值
-   * 寫進試算表 —— 行為與按鈕文案完全相反，會把家長自訂的密碼蓋掉。
-   */
-  const handleResetPasswordToDefault = () => {
-    if (!sheetAdminPassword) {
-      setPasswordError('讀不到試算表裡的 ADM 密碼，請先重新整理資料再試');
-      return;
-    }
-    if (!confirm('確定要清除本機自訂密碼，改用試算表「使用者資料與餘額」中 ADM 的密碼嗎？')) {
-      return;
-    }
-    clearParentPasswordOverride();
-    setPasswordError(null);
-    if (onPasswordChanged) onPasswordChanged(sheetAdminPassword);
-    setPasswordSuccess(true);
-    setTimeout(() => {
-      setPasswordSuccess(false);
-      setIsChangingPassword(false);
-    }, 1500);
   };
 
   return (
@@ -242,200 +199,193 @@ export const SettingsModal: React.FC<Props> = ({
 
         {/* Body Content */}
         <div className="p-4 sm:p-5 overflow-y-auto space-y-5 text-sm">
+          {!isParentUnlocked && (
+            <p className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 flex items-start gap-1.5 leading-relaxed">
+              <Lock className="w-3.5 h-3.5 shrink-0 mt-px" />
+              修改密碼、家長裝置{allowConnectionSettings ? '' : '、連線網址'}與清除資料，要先用密碼進入「家長操作區」才會出現。
+            </p>
+          )}
+
           {/* Section 1: API URL Configuration */}
-          <form onSubmit={handleSaveUrl} className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <label className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                <span>Google Apps Script API 網址</span>
-              </label>
-              <button
-                type="button"
-                onClick={handleRestoreDefault}
-                className="text-[11px] text-blue-600 hover:underline"
-              >
-                還原預設網址
-              </button>
-            </div>
-
-            <div className="space-y-1.5">
-              <input
-                type="url"
-                required
-                value={apiUrl}
-                onChange={(e) => setApiUrl(e.target.value)}
-                placeholder="https://script.google.com/macros/s/.../exec"
-                className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
-              />
-              <p className="text-[11px] text-slate-400">
-                此網址用於讀取與寫入您的 Google 試算表資料。
-              </p>
-            </div>
-
-            <div className="flex items-center justify-between pt-1">
-              <p className="text-[11px] text-slate-400 flex items-center gap-1">
-                <Database className="w-3.5 h-3.5 text-slate-500" />
-                包含任務配分表、點數存摺與使用者資料
-              </p>
-              <button
-                type="submit"
-                className="px-4 py-2 rounded-xl bg-blue-600 text-white font-medium text-xs hover:bg-blue-700 active:scale-95 transition flex items-center gap-1"
-              >
-                {savedSuccess ? (
-                  <>
-                    <Check className="w-3.5 h-3.5" /> 已儲存並重新整理
-                  </>
-                ) : (
-                  '儲存並重新載入'
-                )}
-              </button>
-            </div>
-          </form>
-
-          {/* Section 2: Parent Password Management (NEW) */}
-          <div className="pt-4 border-t border-slate-100 space-y-3">
-            <div className="flex items-center justify-between">
-              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5 text-orange-600" />
-                <span>家長操作密碼設定</span>
-              </h4>
-              {hasCustomPassword && (
-                <span className="text-[10px] bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded font-medium">
-                  已設定自訂密碼
-                </span>
-              )}
-            </div>
-
-            <div className="p-4 rounded-2xl bg-orange-50/70 border border-orange-200/80 space-y-3">
-              <div className="flex items-start justify-between gap-3">
-                <div>
-                  <p className="text-xs font-bold text-slate-800 flex items-center gap-1">
-                    <ShieldCheck className="w-4 h-4 text-emerald-600" />
-                    <span>家長操作專區存取密碼</span>
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    切換至「家長操作區」登記點數時需輸入此密碼。
-                  </p>
-                </div>
-
-                {!isChangingPassword && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIsChangingPassword(true);
-                      setPasswordError(null);
-                    }}
-                    className="px-3 py-1.5 rounded-xl bg-white border border-orange-300 text-orange-700 hover:bg-orange-100/70 text-xs font-semibold transition shrink-0 shadow-2xs flex items-center gap-1"
-                  >
-                    <KeyRound className="w-3.5 h-3.5 text-orange-600" />
-                    <span>修改密碼</span>
-                  </button>
-                )}
+          {allowConnectionSettings && (
+            <form onSubmit={handleSaveUrl} className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <label className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <span>Google Apps Script API 網址</span>
+                </label>
+                <button
+                  type="button"
+                  onClick={handleRestoreDefault}
+                  className="text-[11px] text-blue-600 hover:underline"
+                >
+                  還原預設網址
+                </button>
               </div>
 
-              {/* Password Change Feedback */}
-              {passwordSuccess && (
-                <div className="p-2.5 rounded-xl bg-emerald-100 text-emerald-800 text-xs flex items-center gap-1.5 font-medium animate-in fade-in">
-                  <Check className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>家長密碼已成功更新並儲存！</span>
-                </div>
-              )}
+              <div className="space-y-1.5">
+                <input
+                  type="url"
+                  required
+                  value={apiUrl}
+                  onChange={(e) => setApiUrl(e.target.value)}
+                  placeholder="https://script.google.com/macros/s/.../exec"
+                  className="w-full px-3 py-2 rounded-xl border border-slate-200 text-xs font-mono text-slate-700 focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-transparent transition"
+                />
+                <p className="text-[11px] text-slate-400">
+                  此網址用於讀取與寫入您的 Google 試算表資料。
+                </p>
+              </div>
 
-              {/* Interactive Password Form */}
-              {isChangingPassword && (
-                <form onSubmit={handleChangePasswordSubmit} className="pt-2 border-t border-orange-200/60 space-y-2.5">
-                  {passwordError && (
-                    <div className="p-2 rounded-lg bg-rose-100 text-rose-700 text-xs flex items-center gap-1.5">
-                      <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
-                      <span>{passwordError}</span>
-                    </div>
+              <div className="flex items-center justify-between pt-1">
+                <p className="text-[11px] text-slate-400 flex items-center gap-1">
+                  <Database className="w-3.5 h-3.5 text-slate-500" />
+                  包含任務配分表、點數存摺與使用者資料
+                </p>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl bg-blue-600 text-white font-medium text-xs hover:bg-blue-700 active:scale-95 transition flex items-center gap-1"
+                >
+                  {savedSuccess ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" /> 已儲存並重新整理
+                    </>
+                  ) : (
+                    '儲存並重新載入'
                   )}
+                </button>
+              </div>
+            </form>
+          )}
 
-                  <div className="space-y-1">
-                    <label className="block text-[11px] font-semibold text-slate-700">目前密碼</label>
-                    <input
-                      type="password"
-                      required
-                      value={oldPassword}
-                      onChange={(e) => setOldPassword(e.target.value)}
-                      placeholder="請輸入原本密碼"
-                      className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
-                    />
+          {/* Section 2: Parent Password Management (NEW) */}
+          {isParentUnlocked && (
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <div className="flex items-center justify-between">
+                <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <KeyRound className="w-3.5 h-3.5 text-orange-600" />
+                  <span>家長操作密碼設定</span>
+                </h4>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-orange-50/70 border border-orange-200/80 space-y-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="text-xs font-bold text-slate-800 flex items-center gap-1">
+                      <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                      <span>家長操作專區存取密碼</span>
+                    </p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      切換至「家長操作區」登記點數時需輸入此密碼。
+                    </p>
                   </div>
 
-                  <div className="grid grid-cols-2 gap-2">
-                    <div className="space-y-1">
-                      <label className="block text-[11px] font-semibold text-slate-700">新密碼</label>
-                      <input
-                        type="password"
-                        required
-                        value={newPassword}
-                        onChange={(e) => setNewPassword(e.target.value)}
-                        placeholder="至少 4 碼"
-                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
-                      />
-                    </div>
+                  {!isChangingPassword && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsChangingPassword(true);
+                        setPasswordError(null);
+                      }}
+                      className="px-3 py-1.5 rounded-xl bg-white border border-orange-300 text-orange-700 hover:bg-orange-100/70 text-xs font-semibold transition shrink-0 shadow-2xs flex items-center gap-1"
+                    >
+                      <KeyRound className="w-3.5 h-3.5 text-orange-600" />
+                      <span>修改密碼</span>
+                    </button>
+                  )}
+                </div>
 
-                    <div className="space-y-1">
-                      <label className="block text-[11px] font-semibold text-slate-700">確認新密碼</label>
-                      <input
-                        type="password"
-                        required
-                        value={confirmPassword}
-                        onChange={(e) => setConfirmPassword(e.target.value)}
-                        placeholder="再次輸入新密碼"
-                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
-                      />
-                    </div>
+                {/* Password Change Feedback */}
+                {passwordSuccess && (
+                  <div className="p-2.5 rounded-xl bg-emerald-100 text-emerald-800 text-xs flex items-center gap-1.5 font-medium animate-in fade-in">
+                    <Check className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>家長密碼已成功更新並儲存！</span>
                   </div>
+                )}
 
-                  <div className="flex items-center justify-between pt-1">
-                    {hasCustomPassword ? (
-                      <button
-                        type="button"
-                        onClick={handleResetPasswordToDefault}
-                        className="text-[11px] text-slate-500 hover:text-slate-800 flex items-center gap-1"
-                      >
-                        <RotateCcw className="w-3 h-3" />
-                        <span>還原試算表原始密碼</span>
-                      </button>
-                    ) : (
-                      <span />
+                {/* Interactive Password Form */}
+                {isChangingPassword && (
+                  <form onSubmit={handleChangePasswordSubmit} className="pt-2 border-t border-orange-200/60 space-y-2.5">
+                    {passwordError && (
+                      <div className="p-2 rounded-lg bg-rose-100 text-rose-700 text-xs flex items-center gap-1.5">
+                        <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0" />
+                        <span>{passwordError}</span>
+                      </div>
                     )}
 
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setIsChangingPassword(false);
-                          setPasswordError(null);
-                        }}
-                        className="px-3 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-medium transition"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="submit"
-                        disabled={isUpdatingPassword}
-                        className="px-3.5 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold transition flex items-center gap-1 shadow-xs disabled:opacity-50"
-                      >
-                        {isUpdatingPassword ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                            <span>同步中...</span>
-                          </>
-                        ) : (
-                          <>
-                            <Check className="w-3.5 h-3.5" />
-                            <span>確認修改</span>
-                          </>
-                        )}
-                      </button>
+                    <div className="space-y-1">
+                      <label className="block text-[11px] font-semibold text-slate-700">目前密碼</label>
+                      <input
+                        type="password"
+                        required
+                        value={oldPassword}
+                        onChange={(e) => setOldPassword(e.target.value)}
+                        placeholder="請輸入原本密碼"
+                        className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
+                      />
                     </div>
-                  </div>
-                </form>
-              )}
+
+                    <div className="grid grid-cols-2 gap-2">
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">新密碼</label>
+                        <input
+                          type="password"
+                          required
+                          value={newPassword}
+                          onChange={(e) => setNewPassword(e.target.value)}
+                          placeholder="至少 4 碼"
+                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
+                        />
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="block text-[11px] font-semibold text-slate-700">確認新密碼</label>
+                        <input
+                          type="password"
+                          required
+                          value={confirmPassword}
+                          onChange={(e) => setConfirmPassword(e.target.value)}
+                          placeholder="再次輸入新密碼"
+                          className="w-full px-3 py-1.5 rounded-xl border border-slate-200 bg-white text-xs text-slate-800 focus:outline-hidden focus:ring-2 focus:ring-orange-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end pt-1">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsChangingPassword(false);
+                            setPasswordError(null);
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-700 text-xs font-medium transition"
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isUpdatingPassword}
+                          className="px-3.5 py-1.5 rounded-xl bg-orange-600 hover:bg-orange-700 text-white text-xs font-bold transition flex items-center gap-1 shadow-xs disabled:opacity-50"
+                        >
+                          {isUpdatingPassword ? (
+                            <>
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              <span>同步中...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Check className="w-3.5 h-3.5" />
+                              <span>確認修改</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* 受信任裝置：只有這些裝置能用指紋直接進家長區 */}
           {onRemoveDevice && (
@@ -569,31 +519,33 @@ export const SettingsModal: React.FC<Props> = ({
           )}
 
           {/* Section 3: Data Reset Section */}
-          <div className="pt-4 border-t border-slate-100 space-y-3">
-            <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
-              本機資料管理
-            </h4>
-            <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
-              <div>
-                <p className="font-medium text-slate-800 text-xs">清除本機紀錄快取</p>
-                <p className="text-[11px] text-slate-400">
-                  重設在前端新增的臨時點數與存摺紀錄，回到 Google Sheet 初始狀態
-                </p>
+          {isParentUnlocked && (
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <h4 className="text-xs font-semibold text-slate-700 uppercase tracking-wider">
+                本機資料管理
+              </h4>
+              <div className="flex items-center justify-between p-3.5 rounded-2xl bg-slate-50 border border-slate-200">
+                <div>
+                  <p className="font-medium text-slate-800 text-xs">清除本機快取</p>
+                  <p className="text-[11px] text-slate-400">
+                    清掉這台手機暫存的分數、紀錄與密碼資料，重新從 Google Sheet 讀取。試算表本身不受影響
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (confirm('確定要清除這台手機的暫存資料嗎？將會重新讀取 Google Sheet，試算表本身不受影響。')) {
+                      onResetLocalData();
+                      onClose();
+                    }
+                  }}
+                  className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-medium transition shrink-0 ml-3 flex items-center gap-1"
+                >
+                  <Trash2 className="w-3.5 h-3.5" /> 清除
+                </button>
               </div>
-              <button
-                type="button"
-                onClick={() => {
-                  if (confirm('確定要清除所有本機新增的紀錄嗎？將會重新讀取 Google Sheet 資料。')) {
-                    onResetLocalData();
-                    onClose();
-                  }
-                }}
-                className="px-3 py-1.5 rounded-xl border border-rose-200 text-rose-600 hover:bg-rose-50 text-xs font-medium transition shrink-0 ml-3 flex items-center gap-1"
-              >
-                <Trash2 className="w-3.5 h-3.5" /> 清除
-              </button>
             </div>
-          </div>
+          )}
         </div>
 
         {/* Footer */}

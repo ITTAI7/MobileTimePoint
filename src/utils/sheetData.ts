@@ -91,48 +91,89 @@ export function parseCleanUsers(rawUsers?: RawUser[]): CleanUser[] {
   });
 }
 
+/** 舊版留下的本機明文密碼，現在只剩清除用途 */
 export const PARENT_PASSWORD_OVERRIDE_KEY = 'weekend_points_parent_password';
 
-/**
- * 目前生效的家長密碼。回傳空字串代表「沒有設定」——
- * 呼叫端必須把它當成無法解鎖，而不是退回某組內建的預設值：
- * 預設值寫在前端程式碼裡，等於人人都知道。
- */
-export function getParentPassword(sheetPassword?: string): string {
-  try {
-    const local = localStorage.getItem(PARENT_PASSWORD_OVERRIDE_KEY);
-    if (local && local.trim() !== '') return local.trim();
-  } catch {
-    // ignore
-  }
-  return sheetPassword ? sheetPassword.trim() : '';
-}
-
-/* ─────────────── 家長密碼的本機雜湊 ───────────────
- * 密碼存在試算表裡，所以原本每次都要等連線回來才能驗證（約 3 秒）。
- * 這裡把密碼的 SHA-256 存在本機，解鎖時改為雜湊比對，不用連線。
+/* ─────────────── 家長密碼的雜湊 ───────────────
+ * 試算表的讀取網址是公開的（就寫在前端程式裡），所以伺服器不回傳密碼本身，
+ * 只回傳 adminPasswordHash。解鎖時把輸入的密碼算成雜湊再比對，
+ * 本機也只存這個雜湊，離線時一樣能解鎖。
  *
- * 只存雜湊不存明文，小孩開開發者工具看到的是一串 16 進位字元。
  * 要強調的是：**這是遮蔽，不是加密**。四位數密碼的雜湊對懂的人來說
  * 幾毫秒就能暴力反推。它擋的是「隨手翻一下」，不是有心破解。
  */
 
 const PASSWORD_HASH_KEY = 'weekend_points_parent_password_hash_v1';
+// 必須與 gas/Code.gs 的 PASSWORD_HASH_SALT 一致，否則所有密碼都會比對失敗
 const HASH_SALT = 'mobiletimepoint:v1:';
 
-/** 算不出來時回 null（瀏覽器不支援或非安全來源），呼叫端要能退回連線驗證 */
-export async function hashPassword(password: string): Promise<string | null> {
-  try {
-    const subtle = globalThis.crypto?.subtle;
-    if (!subtle) return null;
-    const data = new TextEncoder().encode(HASH_SALT + password.trim());
-    const buf = await subtle.digest('SHA-256', data);
-    return Array.from(new Uint8Array(buf))
-      .map((b) => b.toString(16).padStart(2, '0'))
-      .join('');
-  } catch {
-    return null;
+const SHA256_K = new Uint32Array([
+  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/**
+ * SHA-256（UTF-8 編碼後計算），回傳 16 進位字串。
+ *
+ * 不用 crypto.subtle：它只在 HTTPS 下存在，用區網 IP 開發時會拿不到，
+ * 密碼就完全無法驗證。自己算的結果與 subtle、與 Apps Script 的 computeDigest 完全相同。
+ */
+function sha256Hex(message: string): string {
+  const data = new TextEncoder().encode(message);
+  // 補位：先補 0x80，再補 0 到長度為 64 的倍數，最後 8 bytes 放原文的位元長度
+  const total = Math.ceil((data.length + 9) / 64) * 64;
+  const buf = new Uint8Array(total);
+  buf.set(data);
+  buf[data.length] = 0x80;
+  const view = new DataView(buf.buffer);
+  const bitLen = data.length * 8;
+  view.setUint32(total - 8, Math.floor(bitLen / 0x100000000));
+  view.setUint32(total - 4, bitLen >>> 0);
+
+  const h = new Uint32Array([
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+  ]);
+  const w = new Uint32Array(64);
+  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
+
+  for (let off = 0; off < total; off += 64) {
+    for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4);
+    for (let i = 16; i < 64; i++) {
+      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+      w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+
+    let a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (let i = 0; i < 64; i++) {
+      const t1 = (hh + (rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25)) + ((e & f) ^ (~e & g)) + SHA256_K[i] + w[i]) >>> 0;
+      const t2 = ((rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22)) + ((a & b) ^ (a & c) ^ (b & c))) >>> 0;
+      hh = g;
+      g = f;
+      f = e;
+      e = (d + t1) >>> 0;
+      d = c;
+      c = b;
+      b = a;
+      a = (t1 + t2) >>> 0;
+    }
+    h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+    h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
   }
+
+  return Array.from(h)
+    .map((x) => x.toString(16).padStart(8, '0'))
+    .join('');
+}
+
+export function hashPassword(password: string): string {
+  return sha256Hex(HASH_SALT + password.trim());
 }
 
 export function getCachedPasswordHash(): string | null {
@@ -160,8 +201,8 @@ export function clearCachedPasswordHash() {
 }
 
 /**
- * 舊版改密碼會在本機另存一份明文 override，而且優先於試算表。
- * 現在改密碼一律先寫進試算表，不再產生 override；這裡只負責清掉舊版留下的。
+ * 舊版改密碼會在本機另存一份明文 override，而且優先於試算表 ——
+ * 那台手機從此不理會試算表的密碼。現在一律以試算表為準，App 啟動時就清掉它。
  */
 export function clearParentPasswordOverride(): void {
   try {
@@ -426,11 +467,30 @@ export function removeTrustedDevice(
 }
 
 /**
+ * 家長密碼的雜湊；空字串代表試算表沒有設定密碼。
+ *
+ * 新版 Apps Script 直接給 adminPasswordHash，回應裡沒有密碼本身。
+ * 舊版還會回傳明文密碼，這時在這裡算成雜湊 —— 前端要能同時對付新舊兩版，
+ * 因為 GAS 是手動部署的，兩邊不會同時更新。
+ */
+function resolveAdminPasswordHash(data: RawSheetResponse, users: CleanUser[]): string {
+  if (typeof data.adminPasswordHash === 'string') return data.adminPasswordHash.trim().toLowerCase();
+  const admin = users.find((u) => u.isAdmin);
+  return admin?.password ? hashPassword(admin.password) : '';
+}
+
+/**
  * @param fresh 略過伺服器端快取，強制重讀試算表。
  *              平常開啟用快取（快很多）；按下重新整理、或需要確認剛才的寫入時才用 true。
+ * @param options.allHistory 回傳完整歷史而不只本週。核對「補登上週的那筆到底寫進去沒有」時必須用，
+ *              否則那筆本來就不在本週的回應裡，會被誤判成沒寫入。
  */
-export async function fetchSheetData(fresh = false, customUrl?: string): Promise<{
+export async function fetchSheetData(
+  fresh = false,
+  options: { allHistory?: boolean } = {}
+): Promise<{
   tasks: CleanTask[];
+  /** 已去掉密碼欄 —— 明文密碼不留在記憶體裡 */
   users: CleanUser[];
   records: CleanRecord[];
   audit: SheetAudit | null;
@@ -443,10 +503,12 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
    */
   hasDeviceRegistry: boolean;
   maxTrustedDevices: number;
-  raw: RawSheetResponse;
+  /** 家長密碼的雜湊；空字串代表試算表沒有設定密碼 */
+  adminPasswordHash: string;
 }> {
-  const base = customUrl || getStoredApiUrl();
-  const url = fresh ? `${base}${base.includes('?') ? '&' : '?'}fresh=1` : base;
+  const base = getStoredApiUrl();
+  const params = [options.allHistory ? 'range=all' : '', fresh ? 'fresh=1' : ''].filter(Boolean);
+  const url = params.length ? `${base}${base.includes('?') ? '&' : '?'}${params.join('&')}` : base;
 
   // Apps Script 的 /exec 會 302 轉到 googleusercontent.com，那一跳約有兩成機率回 404。
   // 這是 Google 端的間歇性問題，不是網址或權限錯誤，所以重試即可 ——
@@ -490,14 +552,14 @@ export async function fetchSheetData(fresh = false, customUrl?: string): Promise
 
   return {
     tasks,
-    users,
+    users: users.map(({ password: _password, ...rest }) => rest),
     records,
     audit: parseAudit(data.audit),
     trustedDevices: parseTrustedDevices(data.trustedDevices),
     hasDeviceRegistry: Array.isArray(data.trustedDevices),
     // 伺服器沒回報時退回 2，與後端的 MAX_TRUSTED_DEVICES 一致
     maxTrustedDevices: Number(data.maxTrustedDevices) || 2,
-    raw: data,
+    adminPasswordHash: resolveAdminPasswordHash(data, users),
   };
 }
 
@@ -665,11 +727,16 @@ export function fromTaipei(year: number, month: number, day: number, h = 0, m = 
   return new Date(Date.UTC(year, month - 1, day, h, m, s) - TAIPEI_OFFSET_MS);
 }
 
-/** 台北的今天，格式 YYYY-MM-DD（date input 需要） */
-export function todayTaipeiISO(): string {
-  const p = taipeiParts();
+/** 某個時刻在台北是哪一天，格式 YYYY-MM-DD（date input 需要） */
+export function taipeiDateISO(d: Date): string {
+  const p = taipeiParts(d);
   const pad = (n: number) => String(n).padStart(2, '0');
   return `${p.year}-${pad(p.month)}-${pad(p.day)}`;
+}
+
+/** 台北的今天，格式 YYYY-MM-DD */
+export function todayTaipeiISO(): string {
+  return taipeiDateISO(new Date());
 }
 
 /**
@@ -783,6 +850,11 @@ export interface WriteRecordResult {
   confirmed: boolean;
   /** 伺服器依試算表現值算出的權威餘額，只有 confirmed 時才有 */
   newBalance?: number;
+  /**
+   * 伺服器順手修正了幾列存摺的餘額快照。大於 0 代表這筆是補登、排到了中間，
+   * 其他列的「餘額」都變了 —— 畫面必須整份重讀才會跟試算表一致。
+   */
+  snapshotsResynced?: number;
   logId?: string;
   message?: string;
   code?: string;
@@ -849,6 +921,7 @@ export async function writeRecordToGoogleSheet(
           confirmed: true,
           // 伺服器是讀試算表現值算出來的，比前端自己加減可靠
           newBalance: typeof json.newBalance === 'number' ? json.newBalance : undefined,
+          snapshotsResynced: Number(json.snapshotsResynced) || 0,
           logId: typeof json.logId === 'string' ? json.logId : undefined,
           message: '已成功寫入 Google Sheet！',
         };

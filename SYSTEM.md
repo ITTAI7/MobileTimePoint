@@ -126,6 +126,10 @@ dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
 重新部署務必走：**部署 → 管理部署作業 → 選現有部署 → 編輯（鉛筆）→ 版本選「新版本」→ 部署**。
 使用「新增部署作業」會產生**全新的 `/exec` 網址**，舊網址立即 404，前端會整個連不上。
 
+**改到 doGet 回傳格式時，部署順序是「先前端、後 GAS」。**
+前端要先寫成新舊格式都能讀，推上 Vercel、每支手機打開一次 App 拿到新版之後，才部署 GAS。
+反過來的話，還沒更新的手機會讀不懂新格式 —— 例如密碼改成雜湊那次，舊前端會以為沒有設定密碼，家長區就進不去了。
+
 ### 讀取
 
 ```
@@ -145,6 +149,7 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
   "weekStart": "2026-09-19T16:00:00.000Z",
   "weekEnd":   "2026-09-26T16:00:00.000Z",
   "logsTotal": 11,
+  "adminPasswordHash": "9f86d0…（64 碼）",
   "trustedDevices": [ { "credentialId": "...", "label": "爸爸的手機", "registeredAt": "..." } ],
   "maxTrustedDevices": 2,
   "timestamp": "..."
@@ -152,6 +157,13 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
 ```
 
 `trustedDevices` 存在 **ScriptProperties**（不在試算表裡），所以清空試算表不會影響它。
+
+**回應裡沒有密碼。** 「使用者資料與餘額」的密碼欄在放進回應（與快取）之前就被拿掉，
+改成 `adminPasswordHash` = SHA-256(`mobiletimepoint:v1:` + 密碼)，16 進位小寫；
+密碼欄空白時是空字串，前端當成「尚未設定密碼」。
+讀取網址是公開的（寫在前端程式裡），明文密碼放在這裡等於公布給所有人。
+
+前端兩種回應都吃：舊版 GAS 仍回傳明文時，前端自行算出同樣的雜湊，且不把明文留在記憶體。
 
 ### 寫入
 
@@ -221,6 +233,7 @@ curl -sk -L --data-binary @payload.json \
 | 試算表欄位名 | 兩邊都有 | 前端 `parseClean*` 與後端 `findCol_` 都靠欄位名比對 |
 | 受信任裝置 | 後端 ScriptProperties `trusted_devices_v1` | 前端以 `credentialId` 比對。**本機憑證必須同時在伺服器名單上才算受信任** —— 只看 localStorage 的話，偽造一筆就能繞過 |
 | 週的定義 | 前後端各一份 | 前端 `getWeekRange()`、後端 `weekRange_()`，皆為「週日 00:00 起、下週日 00:00 止」，邏輯必須一致 |
+| 密碼雜湊的鹽 | 前端 `sheetData.ts` 的 `HASH_SALT`、後端的 `PASSWORD_HASH_SALT` | 兩邊必須完全相同，否則任何密碼都解不了鎖。改了鹽，所有裝置的本機雜湊也會失效，要重新連線一次 |
 
 **時區**：Apps Script 專案時區必須與試算表時區相同（目前為 `Asia/Taipei`），否則週的分界會偏移數小時。
 前端**不用瀏覽器時區**：週區間、補登日期、寫入試算表的時間、明細顯示一律以固定 UTC+8 計算（`sheetData.ts` 的台北時間段落），手機時區設錯或出國時才不會與後端對不上。
@@ -245,13 +258,12 @@ curl -sk -L --data-binary @payload.json \
 |---|---|---|
 | `vite.config.ts` 使用 `__dirname` | 目前只是警告，未來 Vite 版本會不支援 | 改用 `import.meta.dirname` |
 | 倉庫未納入 lock 檔 | 不同時間安裝可能取得不同的相依版本 | 若需可重現的建置，在部署環境提交該環境產生的 lock 檔 |
-| 家長密碼僅前端驗證 | 明碼寫在 bundle 與試算表，開 DevTools 即可看到 | 定位是「防小孩誤按」，**不是安全機制**。不要用它保護真正敏感的東西 |
-| 寫入時的網路錯誤無法判斷是否已寫入 | 回應可能在回程遺失，但資料常常已經寫進去 | **不重送**（addLog / addTask 非冪等）。addLog 標為 `confirmed: false`，前端回讀試算表核對該筆 `logId`；addTask 回報「無法確認」請使用者先重新整理 |
+| 家長密碼僅前端驗證 | 讀取網址只回傳加鹽雜湊，但四位數密碼的雜湊會寫程式的人幾毫秒就能反推；登記分數的 `addLog` 本身也不驗密碼，知道網址又會打 API 的人可以直接加分 | 定位是「防小孩」，**不是安全機制**。要真正擋住，得讓 `addLog` 等寫入動作也在伺服器驗證身分，改動較大 |
+| 寫入時的網路錯誤無法判斷是否已寫入 | 回應可能在回程遺失，但資料常常已經寫進去 | **不重送**（addLog / addTask 非冪等）。addLog 標為 `confirmed: false`，前端回讀試算表（**完整歷史**，補登上週的才找得到）核對該筆 `logId`，讀不到時畫面明講「無法確認」而不是「沒寫入」；addTask 回報「無法確認」請使用者先重新整理 |
 | 試算表 ADM 密碼欄為空時無法進入家長區 | 沒有內建預設密碼可用 | 刻意的：預設密碼寫在前端等於人人都知道。到試算表填入密碼後重新整理即可 |
 | 指紋解鎖不做密碼學驗證 | WebAuthn 的簽章沒有送回伺服器檢查，開 DevTools 可繞過 | 與密碼同級的「防小孩」機制。名額上限與名單本身是伺服器把關的，那部分繞不過 |
 | `trustedDevices` 在 doGet 公開回傳 | 任何人打 exec 網址都看得到裝置標籤與 credentialId | 實害有限（沒有私鑰按不出指紋）。要收斂的話，改成只回「這台在不在名單上」，完整名單驗密碼才給 |
 | 登記被伺服器拒絕時，手機裡的 passkey 無法刪除 | WebAuthn 沒有提供刪除 API，只能由使用者自行到密碼管理員清 | 送出前先用已載入的名單檢查名額，縮小發生窗口。**不可以改成先查伺服器再建憑證** —— `credentials.create` 需要使用者手勢，中間插入網路請求會讓指紋視窗叫不出來 |
-| 補登過去日期的紀錄需直接呼叫 API | App 介面只能記錄「當下」時間 | 若常用，可在家長操作區加日期選擇器 |
 
 ---
 
@@ -266,9 +278,9 @@ src/
   components/
     KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細
     ParentView.tsx           家長操作區：分類選單、加扣分、兌換透支檢查
-    SettingsModal.tsx        API 網址設定、家長裝置名單、原始回應檢視、清除本機快取
+    SettingsModal.tsx        API 網址、改密碼、家長裝置名單、清除本機快取（都要家長解鎖後才顯示）
     TasksTableModal.tsx      配分表檢視
-    ParentPasswordModal.tsx / ChangePasswordModal.tsx
+    ParentPasswordModal.tsx    家長區解鎖（密碼雜湊比對／指紋）
     PWAInstallButton.tsx
   hooks/                     useOnlineStatus、usePWAInstall
 scripts/generate-icons.js    產生 PWA 圖示的一次性工具

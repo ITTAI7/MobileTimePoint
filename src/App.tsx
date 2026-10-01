@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { CleanTask, CleanUser, CleanRecord, RawSheetResponse, SheetAudit, RecalcResult, TrustedDevice } from './types';
+import { CleanTask, CleanUser, CleanRecord, SheetAudit, RecalcResult, TrustedDevice, SubmitRecordResult } from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -11,7 +11,7 @@ import {
   getCachedUsers,
   saveCachedUsers,
   clearLocalData,
-  getParentPassword,
+  clearParentPasswordOverride,
   hashPassword,
   getCachedPasswordHash,
   saveCachedPasswordHash,
@@ -24,6 +24,10 @@ import {
   getCachedTrustedDevices,
   saveCachedTrustedDevices,
   parseSheetTime,
+  getWeekRange,
+  isInWeek,
+  taipeiDateISO,
+  todayTaipeiISO,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
 } from './utils/sheetData';
@@ -54,6 +58,16 @@ import {
   Sparkles
 } from 'lucide-react';
 
+/** 依時間由新到舊排序（台北時間解讀，與畫面顯示一致） */
+function sortNewestFirst(records: CleanRecord[]): CleanRecord[] {
+  return [...records].sort(
+    (a, b) => parseSheetTime(b.timestamp).getTime() - parseSheetTime(a.timestamp).getTime()
+  );
+}
+
+/** 家長區解鎖後，App 退到背景超過這個時間，回來時自動上鎖 */
+const AUTO_LOCK_AFTER_MS = 5 * 60 * 1000;
+
 export default function App() {
   // 用 lazy initializer 在「第一次渲染之前」就把快取讀進來，
   // 這樣有快取時完全不會出現載入轉圈，畫面是秒開的。
@@ -65,7 +79,6 @@ export default function App() {
 
   // 資料是否已經跟 Google Sheet 同步過（快取畫出來的不算）
   const [hasFreshData, setHasFreshData] = useState(false);
-  const [rawResponse, setRawResponse] = useState<RawSheetResponse | null>(null);
   const [audit, setAudit] = useState<SheetAudit | null>(null);
   const [recalcPreview, setRecalcPreview] = useState<RecalcResult | null>(null);
   const [recalcBusy, setRecalcBusy] = useState(false);
@@ -89,20 +102,13 @@ export default function App() {
 
   const isOnline = useOnlineStatus();
 
-  // Find admin user for password
-  const adminUser = users.find((u) => u.isAdmin || u.id.toUpperCase() === 'ADM' || u.name === '家長');
-  const [effectivePassword, setEffectivePassword] = useState<string>(() =>
-    getParentPassword(adminUser?.password)
-  );
-
-  // Keep effective password in sync if adminUser changes
+  // 舊版在本機留的明文密碼會蓋過試算表，那台手機從此不理會試算表改的密碼。一律以試算表為準。
   useEffect(() => {
-    if (adminUser?.password) {
-      setEffectivePassword(getParentPassword(adminUser.password));
-    }
-  }, [adminUser]);
+    clearParentPasswordOverride();
+  }, []);
 
-  // 密碼的本機雜湊，讓解鎖不必等連線
+  // 家長密碼的雜湊（來自伺服器，並存在本機）。解鎖只比對雜湊，不用等連線，
+  // 也不需要知道密碼本身 —— 伺服器的讀取網址是公開的，不能回傳明文密碼。
   const [passwordHash, setPasswordHash] = useState<string | null>(() => getCachedPasswordHash());
 
   /* ─── 受信任裝置（指紋解鎖）─── */
@@ -217,66 +223,90 @@ export default function App() {
     return { ok: true };
   };
 
-  // 只在資料確實同步過之後才存雜湊 ——
-  // 否則連線失敗時 effectivePassword 會是內建預設值，存下去就把錯的密碼記起來了。
-  useEffect(() => {
-    if (!hasFreshData) return;
-    if (!effectivePassword) {
-      // 試算表把密碼清掉了：舊的雜湊也要作廢，否則離線時仍能用舊密碼解鎖
-      clearCachedPasswordHash();
-      setPasswordHash(null);
-      return;
-    }
-    let cancelled = false;
-    hashPassword(effectivePassword).then((h) => {
-      if (cancelled || !h) return;
-      saveCachedPasswordHash(h);
-      setPasswordHash(h);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [hasFreshData, effectivePassword]);
-
   /**
-   * 驗證家長密碼。
-   * 資料已同步時直接比對明文（最權威）；否則用本機雜湊，使用者就不用等那 3 秒。
+   * 讀取的先後順序。每次讀取開始時領一個號碼，畫面上的分數與紀錄只接受
+   * 「比目前顯示的資料更新」的回應。
+   *
+   * 沒有這道檢查的話：開 App 時的背景讀取還沒回來（GAS 塞車時會重試好幾次），
+   * 家長已經登記成功、畫面也更新了；接著那個較早發出的讀取才回來，
+   * 把畫面蓋回登記前的分數，剛才那筆也不見了 —— 家長會以為沒登記到而重登一次。
    */
-  const verifyParentPassword = async (input: string): Promise<boolean> => {
+  const loadTicket = useRef(0);
+  const shownDataTicket = useRef(0);
+  const passwordChangedTicket = useRef(0);
+  const loadsInFlight = useRef(0);
+  /** 標記「畫面上的資料已經比在這之前發出的讀取都新」（寫入確認成功時呼叫） */
+  const markScreenNewest = () => {
+    shownDataTicket.current = ++loadTicket.current;
+  };
+
+  /** 比對密碼但不改任何狀態；還沒有雜湊可比（從沒同步過）時回 null */
+  const checkParentPassword = (input: string): boolean | null => {
     const candidate = input.trim();
-    if (!candidate) return false;
+    if (!passwordHash) return null;
+    return candidate !== '' && hashPassword(candidate) === passwordHash;
+  };
 
-    const remember = (ok: boolean) => {
-      if (ok) setUnlockedWithPassword(candidate);
-      return ok;
-    };
+  /** 驗證家長密碼。通過時把密碼暫存在記憶體，登記指紋時伺服器要再驗一次。 */
+  const verifyParentPassword = async (input: string): Promise<boolean> => {
+    const ok = checkParentPassword(input) === true;
+    if (ok) setUnlockedWithPassword(input.trim());
+    return ok;
+  };
 
-    if (hasFreshData) return remember(candidate === effectivePassword.trim());
-
-    if (passwordHash) {
-      const h = await hashPassword(candidate);
-      return remember(h !== null && h === passwordHash);
-    }
-    return false;
+  /** 設定裡改密碼成功（試算表已確認寫入）之後呼叫 */
+  const handlePasswordChanged = (newPassword: string) => {
+    const h = hashPassword(newPassword);
+    saveCachedPasswordHash(h);
+    setPasswordHash(h);
+    // 記憶體裡暫存的也要換成新的，否則接著登記指紋會被伺服器以「密碼錯誤」拒絕 ——
+    // 而且是在手機已經建立 passkey 之後才被拒，那把憑證會永遠刪不掉。
+    setUnlockedWithPassword(newPassword);
+    // 改密碼之前就發出的讀取，回來時帶的是舊密碼的雜湊，不能拿來蓋掉新的
+    passwordChangedTicket.current = ++loadTicket.current;
   };
 
   // Load and merge data from Google Sheet & Local Storage
   /**
    * 回傳這次抓到的紀錄，讓「寫入結果不確定」時可以據此判斷實際有沒有寫進去。
+   * 讀取失敗、或回應比畫面上的資料還舊而被捨棄時回 null。
    *
    * @param fresh 略過伺服器快取。開啟 App 時不用（快取快很多），
    *              使用者按重新整理、或要確認剛才的寫入時才需要。
+   * @param options.allHistory 讀完整歷史（回傳值是全部紀錄），畫面上仍只放本週的。
    */
-  const loadData = useCallback(async (fresh = false): Promise<CleanRecord[] | null> => {
+  const loadData = useCallback(async (
+    fresh = false,
+    options: { allHistory?: boolean } = {}
+  ): Promise<CleanRecord[] | null> => {
     // 畫面已經用快取畫好了，這裡只是背景更新，所以一律走 refreshing 而不是 loading
+    loadsInFlight.current += 1;
     setIsRefreshing(true);
     setErrorMessage(null);
     const startedAt = Date.now();
+    const ticket = ++loadTicket.current;
+    const isOutdated = () => ticket < shownDataTicket.current;
 
     try {
-      const data = await fetchSheetData(fresh);
-      setRawResponse(data.raw);
-      setAudit(data.audit);
+      const data = await fetchSheetData(fresh, options);
+
+      // 密碼雜湊一律跟著試算表走：ADM 密碼欄被清空時，這裡也要變成「未設定」，
+      // 舊的雜湊同時作廢，否則離線時仍能用舊密碼解鎖
+      if (ticket > passwordChangedTicket.current) {
+        if (data.adminPasswordHash) {
+          saveCachedPasswordHash(data.adminPasswordHash);
+          setPasswordHash(data.adminPasswordHash);
+        } else {
+          clearCachedPasswordHash();
+          setPasswordHash(null);
+        }
+      }
+      setHasFreshData(true);
+
+      // 比畫面上的資料還舊（在最近一次寫入確認之前就發出的讀取）：
+      // 分數、紀錄、對帳結果都不能拿來覆蓋；配分表與裝置名單不受那次寫入影響，照常更新
+      const outdated = isOutdated();
+      if (!outdated) setAudit(data.audit);
       // 舊版 GAS 沒有這個欄位。當成「名單是空的」會把所有裝置默默解除授權，
       // 所以伺服器沒回報時，裝置狀態一律原封不動。
       if (data.hasDeviceRegistry) {
@@ -301,16 +331,15 @@ export default function App() {
       // Tasks
       if (data.tasks.length > 0) {
         setTasks(data.tasks);
+        saveCachedTasks(data.tasks);
       }
+
+      if (outdated) return null;
+      shownDataTicket.current = ticket;
 
       // Users: Prioritize actual Google Sheet data
       const mergedUsers = data.users.length > 0 ? data.users : INITIAL_USERS_SEED;
       setUsers(mergedUsers);
-
-      // 一律跟著試算表走：ADM 密碼欄若被清空，這裡也要變成「未設定」，
-      // 而不是沿用上一組（或某個內建預設值）
-      const foundAdmin = mergedUsers.find((u) => u.isAdmin || u.id.toUpperCase() === 'ADM' || u.name === '家長');
-      setEffectivePassword(getParentPassword(foundAdmin?.password));
 
       // If selectedUserId is not in children, default to first child.
       // 這裡用 functional update 讀取目前選取的孩子，loadData 才不需要相依 selectedUserId
@@ -323,27 +352,30 @@ export default function App() {
       );
 
       // Records: Directly sync with Google Sheet records (if sheet is cleared to empty, display empty records)
-      const sortedRecords = [...data.records].sort(
-        (a, b) => parseSheetTime(b.timestamp).getTime() - parseSheetTime(a.timestamp).getTime()
-      );
-      setRecords(sortedRecords);
+      const sortedRecords = sortNewestFirst(data.records);
+      // 讀完整歷史時（核對寫入用），畫面上仍只放本週的，與平常的讀取一致
+      const weekRange = getWeekRange();
+      const shownRecords = options.allHistory
+        ? sortedRecords.filter((r) => isInWeek(r.timestamp, weekRange))
+        : sortedRecords;
+      setRecords(shownRecords);
 
       // On successful live sheet sync (especially manual refresh), keep local cache aligned with live sheet
-      saveLocalLogs(sortedRecords);
+      saveLocalLogs(shownRecords);
       const sheetUserPoints: Record<string, number> = {};
       mergedUsers.forEach((u) => {
         sheetUserPoints[u.id] = u.currentPoints;
       });
       saveLocalUsersOverride(sheetUserPoints);
 
-      // 供下次開啟時立刻繪製（使用者資料會自動去掉密碼）
-      saveCachedTasks(data.tasks);
+      // 供下次開啟時立刻繪製
       saveCachedUsers(mergedUsers);
 
-      setHasFreshData(true);
       return sortedRecords;
     } catch (err: unknown) {
       console.warn('Google Sheet fetch error:', err);
+      // 更新的資料已經顯示了，這次較早的讀取失敗不影響什麼，不要跳出錯誤橫幅
+      if (isOutdated()) return null;
       const msg = err instanceof Error ? err.message : '連線失敗';
       setErrorMessage(msg);
 
@@ -363,7 +395,9 @@ export default function App() {
       return null;
     } finally {
       setIsLoading(false);
-      setIsRefreshing(false);
+      // 可能同時有好幾個讀取在跑（開啟時的背景讀取＋按重新整理），全部結束才停止轉圈
+      loadsInFlight.current -= 1;
+      if (loadsInFlight.current === 0) setIsRefreshing(false);
     }
   }, []);
 
@@ -412,10 +446,33 @@ export default function App() {
     handleLockAndForget();
   };
 
+  // 退到背景太久就自動上鎖：手機停在家長區放著過夜、或順手遞給小孩時，不會一直開著。
+  // 只在回到畫面時判斷（背景中的計時器會被系統暫停，不可靠）。
+  // 正在寫入時不鎖，否則寫入結果的訊息會跟著家長區一起消失。
+  const isWritingRef = useRef(false);
+  useEffect(() => {
+    isWritingRef.current = isWritingToSheet;
+  }, [isWritingToSheet]);
+  useEffect(() => {
+    let hiddenAt: number | null = null;
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        hiddenAt = Date.now();
+        return;
+      }
+      const awayMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
+      hiddenAt = null;
+      if (awayMs >= AUTO_LOCK_AFTER_MS && !isWritingRef.current) handleLockParentMode();
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', onVisibilityChange);
+    // handleLockParentMode 只用到 setState，每次渲染都等價，不需要列為相依
+  }, []);
+
   // Handle Parent Submitting a Point Adjustment Record
   const handleParentSubmitRecord = async (
     newRecordData: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
-  ): Promise<{ ok: boolean; message?: string }> => {
+  ): Promise<SubmitRecordResult> => {
     // 一切以試算表為準：**先寫入、確認成功後才更新畫面**，不做樂觀更新。
     // 代價是送出後要等約 3 秒；換來的是畫面上的數字必定與試算表一致。
     const userToUpdate = users.find((u) => u.id === newRecordData.userId);
@@ -443,6 +500,19 @@ export default function App() {
 
       // 明確成功：用伺服器回傳的權威餘額更新，而不是前端自己加減出來的數字
       if (result.success && result.confirmed) {
+        // 在這之前發出、還沒回來的讀取都是寫入前的舊資料，回來時不能蓋掉這筆
+        markScreenNewest();
+
+        // 補登過去的日期：這筆在時間上排到中間，伺服器已經重算了其他列的「餘額」，
+        // 而這筆當天的餘額也不是目前總分。前端拼湊不出正確的畫面，直接整份重讀試算表。
+        const isBackdated =
+          (result.snapshotsResynced ?? 0) > 0 ||
+          taipeiDateISO(parseSheetTime(pendingRecord.timestamp)) !== todayTaipeiISO();
+        if (isBackdated && (await loadData(true)) !== null) {
+          return { ok: true };
+        }
+        // 重讀失敗時寫入仍是確定成功的：先把這筆放進畫面，下次重新整理會校正餘額
+
         const confirmedBalance =
           typeof result.newBalance === 'number' ? result.newBalance : pendingRecord.balanceAfter;
         const confirmedRecord: CleanRecord = { ...pendingRecord, balanceAfter: confirmedBalance };
@@ -456,25 +526,31 @@ export default function App() {
         userMap[newRecordData.userId] = confirmedBalance;
         saveLocalUsersOverride(userMap);
 
-        setRecords((prev) => [confirmedRecord, ...prev]);
-        saveLocalLogs([confirmedRecord, ...getLocalLogs()]);
+        // 先濾掉同一筆：期間若有其他讀取已經把它帶回來，不能出現兩次
+        const withConfirmed = (list: CleanRecord[]) =>
+          sortNewestFirst([confirmedRecord, ...list.filter((r) => r.id !== logId)]);
+        setRecords(withConfirmed);
+        saveLocalLogs(withConfirmed(getLocalLogs()));
 
         return { ok: true };
       }
 
       // 不確定有沒有寫進去（轉址掉回應時約兩成機率）——
       // 不要用猜的，直接回頭讀試算表看實際結果。
-      const refreshed = await loadData(true);
+      // 一定要讀完整歷史：補登上週的那筆不會出現在「本週」的回應裡，
+      // 只讀本週會把已經寫進去的誤判成沒寫入，家長照提示重登就變兩筆。
+      const refreshed = await loadData(true, { allHistory: true });
       if (refreshed === null) {
         return {
           ok: false,
-          message: '已送出但無法確認結果，也讀不到試算表。請稍後按重新整理確認，不要直接重送。',
+          uncertain: true,
+          message: '已經送出，但收不到試算表的回覆，也暫時讀不到試算表，所以無法確認這筆有沒有寫進去。',
         };
       }
       if (refreshed.some((r) => r.id === logId)) {
         return { ok: true };
       }
-      return { ok: false, message: '這筆沒有寫入試算表，請再登記一次' };
+      return { ok: false, message: '重新讀取試算表後確認沒有這一筆，可以再登記一次。' };
     } finally {
       setIsWritingToSheet(false);
     }
@@ -539,8 +615,7 @@ export default function App() {
   // Reset Local Additions
   const handleResetLocalData = () => {
     clearLocalData();
-    // 本機自訂密碼已清掉，記憶體裡的也要跟著回到試算表那組
-    setEffectivePassword(getParentPassword(adminUser?.password));
+    // 密碼雜湊也一併清掉了，重讀時會從試算表重新取得
     loadData(true);
   };
 
@@ -741,65 +816,70 @@ export default function App() {
             )}
 
             <p className="mt-2 text-[11px] text-orange-700/90">
-              積分對不上通常是手動刪改了紀錄但沒同步總分。可以用下面的按鈕讓系統以存摺為準重算。
+              積分對不上通常是手動刪改了紀錄但沒同步總分。
+              {isParentUnlocked
+                ? '可以用下面的按鈕讓系統以存摺為準重算。'
+                : '家長解鎖後，這裡會出現以存摺為準重算的按鈕。'}
             </p>
 
-            {/* 重算：先預覽再套用，不直接改資料 */}
-            <div className="mt-2.5 pt-2.5 border-t border-orange-200">
-              {recalcError && (
-                <p className="mb-2 text-[11px] text-rose-700 font-medium">{recalcError}</p>
-              )}
+            {/* 重算：先預覽再套用，不直接改資料。這會寫入試算表，只給已解鎖的家長 */}
+            {isParentUnlocked && (
+              <div className="mt-2.5 pt-2.5 border-t border-orange-200">
+                {recalcError && (
+                  <p className="mb-2 text-[11px] text-rose-700 font-medium">{recalcError}</p>
+                )}
 
-              {!recalcPreview ? (
-                <button
-                  onClick={handleRecalcPreview}
-                  disabled={recalcBusy}
-                  className="w-full py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
-                >
-                  {recalcBusy ? '計算中...' : '以存摺為準重新計算'}
-                </button>
-              ) : (
-                <div className="space-y-2">
-                  <p className="font-bold">將會這樣修正：</p>
-                  {recalcPreview.totals.length === 0 && recalcPreview.balanceRowsChanged === 0 ? (
-                    <p className="text-orange-700">沒有需要修正的地方。</p>
-                  ) : (
-                    <div className="space-y-1">
-                      {recalcPreview.totals.map((t) => (
-                        <div key={t.userId} className="flex items-center justify-between gap-2">
-                          <span className="font-semibold">{t.name} 總分</span>
-                          <span className="font-mono text-orange-700">
-                            {t.from} → <span className="font-bold">{t.to}</span>
-                          </span>
-                        </div>
-                      ))}
-                      {recalcPreview.balanceRowsChanged > 0 && (
-                        <p className="text-orange-700">
-                          另外修正存摺中 {recalcPreview.balanceRowsChanged} 列的餘額欄
-                        </p>
-                      )}
+                {!recalcPreview ? (
+                  <button
+                    onClick={handleRecalcPreview}
+                    disabled={recalcBusy}
+                    className="w-full py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
+                  >
+                    {recalcBusy ? '計算中...' : '以存摺為準重新計算'}
+                  </button>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="font-bold">將會這樣修正：</p>
+                    {recalcPreview.totals.length === 0 && recalcPreview.balanceRowsChanged === 0 ? (
+                      <p className="text-orange-700">沒有需要修正的地方。</p>
+                    ) : (
+                      <div className="space-y-1">
+                        {recalcPreview.totals.map((t) => (
+                          <div key={t.userId} className="flex items-center justify-between gap-2">
+                            <span className="font-semibold">{t.name} 總分</span>
+                            <span className="font-mono text-orange-700">
+                              {t.from} → <span className="font-bold">{t.to}</span>
+                            </span>
+                          </div>
+                        ))}
+                        {recalcPreview.balanceRowsChanged > 0 && (
+                          <p className="text-orange-700">
+                            另外修正存摺中 {recalcPreview.balanceRowsChanged} 列的餘額欄
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    <div className="flex gap-2 pt-1">
+                      <button
+                        onClick={handleRecalcApply}
+                        disabled={recalcBusy}
+                        className="flex-1 py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
+                      >
+                        {recalcBusy ? '寫入中...' : '確認修正'}
+                      </button>
+                      <button
+                        onClick={() => setRecalcPreview(null)}
+                        disabled={recalcBusy}
+                        className="px-3 py-2 rounded-xl bg-white border border-orange-300 text-orange-800 text-xs font-medium hover:bg-orange-50 transition disabled:opacity-50"
+                      >
+                        取消
+                      </button>
                     </div>
-                  )}
-
-                  <div className="flex gap-2 pt-1">
-                    <button
-                      onClick={handleRecalcApply}
-                      disabled={recalcBusy}
-                      className="flex-1 py-2 rounded-xl bg-orange-600 text-white text-xs font-bold hover:bg-orange-700 active:scale-98 transition disabled:opacity-50"
-                    >
-                      {recalcBusy ? '寫入中...' : '確認修正'}
-                    </button>
-                    <button
-                      onClick={() => setRecalcPreview(null)}
-                      disabled={recalcBusy}
-                      className="px-3 py-2 rounded-xl bg-white border border-orange-300 text-orange-800 text-xs font-medium hover:bg-orange-50 transition disabled:opacity-50"
-                    >
-                      取消
-                    </button>
                   </div>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
+            )}
           </div>
         )}
 
@@ -859,10 +939,12 @@ export default function App() {
       {showPasswordModal && (
         <ParentPasswordModal
           onVerify={verifyParentPassword}
-          // 有本機雜湊就能立刻驗證；兩者皆無時才需要等連線
-          isSyncing={!hasFreshData && !passwordHash}
+          // 有本機雜湊就能立刻驗證；沒有的話要等第一次連線成功
+          isSyncing={!hasFreshData && !passwordHash && isRefreshing}
+          // 連線已經失敗、手上又沒有雜湊：不要一直顯示「同步中」，要說清楚是連不上
+          syncFailed={!hasFreshData && !passwordHash && !isRefreshing}
           // 試算表 ADM 密碼欄是空的：不給任何密碼通過，也不退回內建預設值
-          notConfigured={hasFreshData && !effectivePassword}
+          notConfigured={hasFreshData && !passwordHash}
           // 只有「本機有憑證且伺服器名單也有」才給指紋，避免偽造 localStorage 繞過
           onBiometric={isThisDeviceTrusted ? verifyBiometric : undefined}
           onSuccess={handlePasswordSuccess}
@@ -894,9 +976,12 @@ export default function App() {
           isThisDeviceTrusted={isThisDeviceTrusted}
           onRefreshData={() => loadData(true)}
           onResetLocalData={handleResetLocalData}
-          rawResponse={rawResponse}
-          currentPassword={effectivePassword}
-          onPasswordChanged={(newPass) => setEffectivePassword(newPass)}
+          isParentUnlocked={isParentUnlocked}
+          // 連線設定平常只給已解鎖的家長。例外是這台根本無法驗證密碼（從沒連上過）——
+          // 此時家長也解不了鎖，若網址設錯就永遠救不回來，所以開放修改
+          allowConnectionSettings={isParentUnlocked || !passwordHash}
+          onCheckPassword={checkParentPassword}
+          onPasswordChanged={handlePasswordChanged}
         />
       )}
     </div>

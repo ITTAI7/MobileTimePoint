@@ -6,6 +6,8 @@ interface Props {
   onVerify: (password: string) => Promise<boolean>;
   /** 既沒有本機雜湊、資料也還沒同步，此時無從驗證 */
   isSyncing?: boolean;
+  /** 同上，但連線已經失敗（不是還在等）—— 要明講連不上，不能一直轉圈 */
+  syncFailed?: boolean;
   /** 試算表的 ADM 密碼欄是空的 —— 沒有任何密碼能通過，要請家長先去設定 */
   notConfigured?: boolean;
   /** 這台裝置已登記指紋時才會傳入；回 true 代表驗證通過 */
@@ -17,6 +19,7 @@ interface Props {
 export const ParentPasswordModal: React.FC<Props> = ({
   onVerify,
   isSyncing = false,
+  syncFailed = false,
   notConfigured = false,
   onBiometric,
   onSuccess,
@@ -27,6 +30,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
   const [error, setError] = useState(false);
   const [checking, setChecking] = useState(false);
   const [bioError, setBioError] = useState<string | null>(null);
+  const cannotVerify = isSyncing || syncFailed || notConfigured;
 
   const handleBiometric = async () => {
     if (!onBiometric || checking) return;
@@ -40,7 +44,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSyncing || notConfigured || checking) return;
+    if (cannotVerify || checking) return;
 
     setChecking(true);
     const ok = await onVerify(password);
@@ -150,6 +154,15 @@ export const ParentPasswordModal: React.FC<Props> = ({
               </p>
             )}
 
+            {syncFailed && (
+              <p className="text-xs text-amber-700 flex items-start gap-1 mt-1">
+                <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>
+                  連不上試算表，這台裝置也還沒有密碼資料，暫時無法驗證。請確認網路後按右上角的重新整理。
+                </span>
+              </p>
+            )}
+
             {notConfigured && !isSyncing && (
               <p className="text-xs text-amber-700 flex items-start gap-1 mt-1">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0 mt-px" />
@@ -159,7 +172,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
               </p>
             )}
 
-            {error && !isSyncing && !notConfigured && (
+            {error && !cannotVerify && (
               <p className="text-xs text-rose-600 flex items-center gap-1 mt-1 animate-in fade-in">
                 <ShieldAlert className="w-3.5 h-3.5 shrink-0" />
                 密碼錯誤，請重新輸入
@@ -177,7 +190,7 @@ export const ParentPasswordModal: React.FC<Props> = ({
             </button>
             <button
               type="submit"
-              disabled={isSyncing || notConfigured || checking}
+              disabled={cannotVerify || checking}
               className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-white text-xs font-bold shadow-md shadow-orange-500/20 active:scale-95 transition flex items-center justify-center gap-1.5 disabled:opacity-50 disabled:active:scale-100"
             >
               <Check className="w-4 h-4" />

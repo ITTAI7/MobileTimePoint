@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from 'react';
-import { CleanUser, CleanTask, CleanRecord } from '../types';
+import React, { useEffect, useMemo, useState } from 'react';
+import { CleanUser, CleanTask, CleanRecord, SubmitRecordResult } from '../types';
 import { taipeiParts, fromTaipei, todayTaipeiISO, getWeekRange } from '../utils/sheetData';
 import {
   Check,
@@ -9,7 +9,8 @@ import {
   ChevronDown,
   Loader2,
   AlertTriangle,
-  BookmarkPlus
+  BookmarkPlus,
+  HelpCircle
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
@@ -20,7 +21,7 @@ interface Props {
   onSelectUser: (userId: string) => void;
   onSubmitRecord: (
     record: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
-  ) => Promise<{ ok: boolean; message?: string }>;
+  ) => Promise<SubmitRecordResult>;
   onAddTask: (task: {
     category: string;
     name: string;
@@ -105,10 +106,26 @@ export const ParentView: React.FC<Props> = ({
   const [saveCustomToTaskList, setSaveCustomToTaskList] = useState(true);
   const [pointsChange, setPointsChange] = useState<number>(parentTasks[0]?.points || 2);
   const [note, setNote] = useState('');
-  const [recordDate, setRecordDate] = useState<string>(todayTaipeiISO());
+  // 家長手動選的補登日期；null 代表「今天」。
+  // 不能在打開時就把今天的日期存起來 —— 家長區開著過夜，隔天登記的紀錄會被默默記成前一天。
+  const [pickedDate, setPickedDate] = useState<string | null>(null);
+  // 只用來讓畫面在跨過午夜後重繪（日期欄、補登提示），送出時一律當場重算今天
+  const [today, setToday] = useState(todayTaipeiISO);
+  const recordDate = pickedDate ?? today;
   const [submittedSuccess, setSubmittedSuccess] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
+  // uncertain：送出了但無法確認有沒有寫進去，與「確定沒寫入」的說法必須不同
+  const [submitError, setSubmitError] = useState<{ message: string; uncertain: boolean } | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    const refresh = () => setToday(todayTaipeiISO());
+    const timer = setInterval(refresh, 60_000);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, []);
 
   // Default to first child if selected is admin or not in children list
   const currentChild = childrenList.find((u) => u.id === selectedUserId) || childrenList[0] || {
@@ -133,10 +150,24 @@ export const ParentView: React.FC<Props> = ({
     }
   };
 
+  // 切到自訂項目時，分數的正負號要跟著類別走。否則從「兌換 −10」切過來，
+  // 會變成「加分項目 −10」，而且預設勾選了存進配分表，錯的項目會永久留在試算表裡。
+  const pointsForCustomCategory = (category: string, points: number): number => {
+    const magnitude = Math.abs(points) || 2;
+    return category.includes('扣分') ? -magnitude : magnitude;
+  };
+
+  const switchToCustom = () => {
+    // 已經在自訂模式就不動，否則會蓋掉家長手動調好的分數
+    if (isCustom) return;
+    setIsCustom(true);
+    setPointsChange((prev) => pointsForCustomCategory(customCategory, prev));
+  };
+
   // Handle Preset Task Selection
   const handleTaskChange = (taskId: string) => {
     if (taskId === '__CUSTOM__') {
-      setIsCustom(true);
+      switchToCustom();
       return;
     }
     setIsCustom(false);
@@ -197,12 +228,16 @@ export const ParentView: React.FC<Props> = ({
       category,
       points: pointsChange,
       note: note.trim() || undefined,
-      timestamp: toTimestamp(recordDate),
+      // 當場重算今天：畫面可能是昨晚打開的，不能沿用那時的日期
+      timestamp: toTimestamp(pickedDate ?? todayTaipeiISO()),
     });
 
-    // 伺服器拒絕（例如另一台裝置搶先兌換掉點數）：顯示原因，不要報成功
+    // 伺服器拒絕（例如另一台裝置搶先兌換掉點數）、或無法確認：顯示原因，不要報成功
     if (!result.ok) {
-      setSubmitError(result.message || '登記失敗，請重新整理後再試');
+      setSubmitError({
+        message: result.message || '登記失敗，請重新整理後再試',
+        uncertain: !!result.uncertain,
+      });
       return;
     }
 
@@ -294,10 +329,7 @@ export const ParentView: React.FC<Props> = ({
               </button>
               <button
                 type="button"
-                onClick={() => {
-                  setIsCustom(true);
-                  if (pointsChange === 0) setPointsChange(2);
-                }}
+                onClick={switchToCustom}
                 className={`px-2.5 py-1 rounded-lg font-medium transition ${
                   isCustom ? 'bg-white text-blue-700 shadow-xs' : 'text-slate-600'
                 }`}
@@ -379,11 +411,7 @@ export const ParentView: React.FC<Props> = ({
                       key={cat}
                       onClick={() => {
                         setCustomCategory(cat);
-                        if (cat === '扣分項目' && pointsChange > 0) {
-                          setPointsChange(-Math.abs(pointsChange));
-                        } else if (cat === '加分項目' && pointsChange < 0) {
-                          setPointsChange(Math.abs(pointsChange));
-                        }
+                        setPointsChange((prev) => pointsForCustomCategory(cat, prev));
                       }}
                       className={`py-1.5 rounded-lg font-medium transition ${
                         customCategory === cat
@@ -485,12 +513,16 @@ export const ParentView: React.FC<Props> = ({
           <input
             type="date"
             value={recordDate}
-            max={todayTaipeiISO()}
-            onChange={(e) => setRecordDate(e.target.value || todayTaipeiISO())}
+            max={today}
+            onChange={(e) => {
+              // 選回今天就恢復「跟著今天走」，不要把今天的日期釘住
+              const value = e.target.value;
+              setPickedDate(!value || value === todayTaipeiISO() ? null : value);
+            }}
             className="w-full px-3.5 py-2 rounded-xl bg-slate-50 border border-slate-200 text-slate-800 text-sm focus:ring-2 focus:ring-blue-500 focus:bg-white focus:outline-none"
           />
 
-          {recordDate !== todayTaipeiISO() && (
+          {recordDate !== today && (
             <div className="mt-2 p-2.5 rounded-xl bg-blue-50 border border-blue-200 text-[11px] text-blue-900">
               <p className="font-semibold">補登過去的紀錄</p>
               {!isThisWeek(recordDate) && (
@@ -580,13 +612,27 @@ export const ParentView: React.FC<Props> = ({
           )}
         </button>
 
-        {/* 伺服器拒絕的錯誤訊息 */}
-        {submitError && (
+        {/* 無法確認有沒有寫入：不能說成失敗，否則家長會重登而變成重複計分 */}
+        {submitError?.uncertain && (
+          <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5">
+            <HelpCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-bold text-amber-800">無法確認是否已登記</p>
+              <p className="text-amber-800 mt-0.5">{submitError.message}</p>
+              <p className="text-amber-900 font-semibold mt-1">
+                請先不要重登。等網路穩定後按右上角的重新整理，看小孩區有沒有這一筆（補登上週的要直接看試算表「點數存摺」），再決定要不要重登。
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* 確定沒有寫入（伺服器拒絕、或重讀試算表確認沒有這筆） */}
+        {submitError && !submitError.uncertain && (
           <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
             <div>
               <p className="font-bold text-rose-800">登記失敗</p>
-              <p className="text-rose-700 mt-0.5">{submitError}</p>
+              <p className="text-rose-700 mt-0.5">{submitError.message}</p>
               <p className="text-rose-600/80 mt-1">
                 試算表沒有寫入這筆，點數與紀錄都沒有變動。
               </p>

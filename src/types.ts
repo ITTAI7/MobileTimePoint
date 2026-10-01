@@ -57,6 +57,8 @@ export interface RawSheetResponse {
   '任務與配分表'?: RawTask[];
   '積分明細/點數存摺'?: RawRecord[];
   '使用者資料與餘額'?: RawUser[];
+  /** 新版 Apps Script 不回傳密碼本身，只回傳這個雜湊（空字串 = 沒設定密碼） */
+  adminPasswordHash?: string;
   [key: string]: unknown;
 }
 
@@ -134,6 +136,17 @@ export interface CleanUser {
   avatarColor?: string;
   password?: string;
   isAdmin?: boolean;
+}
+
+/** 家長登記一筆積分的結果 */
+export interface SubmitRecordResult {
+  ok: boolean;
+  /**
+   * 送出了，但無法確認試算表有沒有寫進去。畫面必須跟「確定失敗」分開講 ——
+   * 說成「沒有寫入」的話家長會重登，萬一其實寫進去了就是重複計分。
+   */
+  uncertain?: boolean;
+  message?: string;
 }
 
 export interface CleanRecord {
