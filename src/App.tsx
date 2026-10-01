@@ -37,6 +37,7 @@ import { ParentPasswordModal } from './components/ParentPasswordModal';
 import { TasksTableModal } from './components/TasksTableModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
+import { markWriteStart, markWriteEnd } from './utils/appUpdate';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import {
   isBiometricAvailable,
@@ -67,6 +68,9 @@ function sortNewestFirst(records: CleanRecord[]): CleanRecord[] {
 
 /** 家長區解鎖後，App 退到背景超過這個時間，回來時自動上鎖 */
 const AUTO_LOCK_AFTER_MS = 5 * 60 * 1000;
+
+/** 標題旁的版本號：2.1.0 顯示成 2.1，修正號不是 0 時才顯示完整的 2.1.1（規則見 SYSTEM.md） */
+const APP_VERSION_LABEL = __APP_VERSION__.replace(/\.0$/, '');
 
 export default function App() {
   // 用 lazy initializer 在「第一次渲染之前」就把快取讀進來，
@@ -490,6 +494,8 @@ export default function App() {
     };
 
     setIsWritingToSheet(true);
+    // 寫入與確認期間，新版 App 接手也先不要重新載入
+    markWriteStart();
     try {
       const result = await writeRecordToGoogleSheet(pendingRecord, pendingRecord.balanceAfter);
 
@@ -552,6 +558,7 @@ export default function App() {
       }
       return { ok: false, message: '重新讀取試算表後確認沒有這一筆，可以再登記一次。' };
     } finally {
+      markWriteEnd();
       setIsWritingToSheet(false);
     }
   };
@@ -565,7 +572,8 @@ export default function App() {
     points: number;
     note?: string;
   }): Promise<{ ok: boolean; taskId?: string; message?: string }> => {
-    const res = await addNewTaskToGoogleSheet(task);
+    markWriteStart();
+    const res = await addNewTaskToGoogleSheet(task).finally(markWriteEnd);
     if (!res.success) {
       return { ok: false, message: res.message || '新增項目至試算表失敗' };
     }
@@ -633,6 +641,9 @@ export default function App() {
                 <h1 className="font-black text-slate-800 text-sm leading-tight tracking-tight">
                   手機時間存摺
                 </h1>
+                <span className="text-[10px] font-semibold text-slate-400 tabular-nums">
+                  v{APP_VERSION_LABEL}
+                </span>
                 <span className="inline-block w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
               </div>
               <p className="text-[10px] text-slate-500 font-medium">週末積分獎勵系統</p>
