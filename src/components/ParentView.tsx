@@ -120,14 +120,12 @@ export const ParentView: React.FC<Props> = ({
   // 只用來讓畫面在跨過午夜後重繪（日期欄、補登提示），送出時一律當場重算今天
   const [today, setToday] = useState(todayTaipeiISO);
   const recordDate = pickedDate ?? today;
-  // 剛登記的那一筆，顯示在按鈕下方幾秒。連續登記時新的蓋掉舊的，計時也重新開始
+  // 剛登記的那一筆，在按鈕下方短暫提示。連續登記時新的蓋掉舊的，計時也重新開始
   const [lastSubmitted, setLastSubmitted] = useState<{
     /** 連續登記時讓提示重新淡入，看得出是新的一筆 */
     at: number;
     name: string;
-    taskName: string;
     points: number;
-    before: number;
   } | null>(null);
   const lastSubmittedTimer = useRef<number | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
@@ -253,15 +251,9 @@ export const ParentView: React.FC<Props> = ({
       timestamp: toTimestamp(pickedDate ?? todayTaipeiISO()),
     });
 
-    setLastSubmitted({
-      at: Date.now(),
-      name: currentChild.name,
-      taskName,
-      points: pointsChange,
-      before: currentChild.currentPoints,
-    });
+    setLastSubmitted({ at: Date.now(), name: currentChild.name, points: pointsChange });
     if (lastSubmittedTimer.current !== null) clearTimeout(lastSubmittedTimer.current);
-    lastSubmittedTimer.current = window.setTimeout(() => setLastSubmitted(null), 5000);
+    lastSubmittedTimer.current = window.setTimeout(() => setLastSubmitted(null), 2000);
 
     setNote('');
     if (isCustom) {
@@ -674,28 +666,20 @@ export const ParentView: React.FC<Props> = ({
           <span>確認登記積分 ({pointsChange >= 0 ? `+${pointsChange}` : pointsChange} 點)</span>
         </button>
 
-        {/* 剛登記的那筆：孩子的分數卡通常已經捲出畫面，所以把分數變化直接寫在這裡 */}
+        {/* 只簡短告知「已登記」。寫入試算表在背景進行，這裡不提寫入狀態 ——
+            一般使用者用不到，只會疑惑（真的沒寫進去時，最上方會有紅色的處理區） */}
         {lastSubmitted && (
           <motion.div
             key={lastSubmitted.at}
             initial={{ opacity: 0, y: -5 }}
             animate={{ opacity: 1, y: 0 }}
-            className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5"
+            className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-sm font-bold flex items-center gap-2"
           >
-            <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <div className="space-y-1 min-w-0">
-              <p className="font-bold text-emerald-800">
-                已登記：{lastSubmitted.name}｜{lastSubmitted.taskName}{' '}
-                {lastSubmitted.points >= 0 ? `+${lastSubmitted.points}` : lastSubmitted.points} 點
-              </p>
-              <p className="text-emerald-700 font-mono">
-                {lastSubmitted.before} → {lastSubmitted.before + lastSubmitted.points} 點
-              </p>
-              <p className="text-emerald-700/80 flex items-center gap-1.5">
-                <SyncMark state="pending" />
-                <span>紀錄旁的灰色「!」表示正在跟試算表核對，完成後會自動消失</span>
-              </p>
-            </div>
+            <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>
+              已登記：{lastSubmitted.name}{' '}
+              {lastSubmitted.points >= 0 ? `+${lastSubmitted.points}` : lastSubmitted.points} 點
+            </span>
           </motion.div>
         )}
 

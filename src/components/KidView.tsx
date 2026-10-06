@@ -117,8 +117,7 @@ export const KidView: React.FC<Props> = ({
 
   // 依台北日期分組：小孩先看到「哪一天」，再看當天做了什麼
   const dayGroups = groupByDay(filteredRecords);
-  // 有記號時才顯示說明，平常不佔版面
-  const hasPending = childRecords.some((r) => r.syncState === 'pending');
+  // 只有「沒寫進去」需要說明（要家長處理）；灰色核對中不解釋，幾秒就自己消失，說了只會讓人疑惑
   const hasFailed = childRecords.some((r) => r.syncState === 'failed');
   const yesterdayKey = dayKeyOf(new Date(Date.now() - 86_400_000));
 
@@ -383,21 +382,11 @@ export const KidView: React.FC<Props> = ({
           </div>
         </div>
 
-        {(hasPending || hasFailed) && (
-          <div className="mt-3 space-y-1 text-[11px]">
-            {hasPending && (
-              <p className="flex items-center gap-1.5 text-slate-500">
-                <SyncMark state="pending" />
-                <span>正在跟試算表核對，完成後會自動消失</span>
-              </p>
-            )}
-            {hasFailed && (
-              <p className="flex items-center gap-1.5 text-rose-700 font-medium">
-                <SyncMark state="failed" />
-                <span>沒有寫進試算表，不計分，請家長到家長區處理</span>
-              </p>
-            )}
-          </div>
+        {hasFailed && (
+          <p className="mt-3 flex items-center gap-1.5 text-[11px] text-rose-700 font-medium">
+            <SyncMark state="failed" />
+            <span>沒有寫進試算表，不計分，請家長到家長區處理</span>
+          </p>
         )}
 
         {/* Records List */}
