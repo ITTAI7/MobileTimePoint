@@ -682,6 +682,7 @@ export function getCachedTrustedDevices(): { devices: TrustedDevice[]; max: numb
   }
 }
 
+/** 待送清單（utils/outbox.ts）刻意不清 —— 那是還沒寫進試算表的登記，清掉就遺失了 */
 export function clearLocalData() {
   try {
     localStorage.removeItem(STORAGE_KEY_LOGS);
@@ -942,10 +943,9 @@ export async function writeRecordToGoogleSheet(
 
     return { success: true, confirmed: false };
   } catch (err: unknown) {
-    // 連線層失敗時**不重送**。第一次請求可能已經寫進去、只是回應在回程遺失，
-    // 而 addLog 不是冪等的 —— 重送就是重複紀錄＋重複計分。
-    // （伺服器雖然會用 LogID 去重，但那要新版 GAS 有部署才生效，前端不該賭這個。）
-    // 回報「不確定」，交給呼叫端依 logId 回讀試算表核對實際結果。
+    // 連線層失敗時這裡**不重送**。第一次請求可能已經寫進去、只是回應在回程遺失。
+    // 回報「不確定」，由呼叫端（App 的待送清單）依 logId 回讀試算表核對，確定沒有才用同一個 logId 重送。
+    // （伺服器雖然也會用 LogID 去重，但「先看再送」不必賭那一層一定有部署。）
     const errorMsg = err instanceof Error ? err.message : '連線失敗';
     return { success: false, confirmed: false, message: errorMsg };
   }

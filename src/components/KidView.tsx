@@ -9,7 +9,8 @@ import {
   parseSheetTime,
   taipeiParts,
 } from '../utils/sheetData';
-import { 
+import { SyncMark } from './SyncMark';
+import {
   Sparkles, 
   Smartphone, 
   Clock, 
@@ -116,6 +117,9 @@ export const KidView: React.FC<Props> = ({
 
   // 依台北日期分組：小孩先看到「哪一天」，再看當天做了什麼
   const dayGroups = groupByDay(filteredRecords);
+  // 有記號時才顯示說明，平常不佔版面
+  const hasPending = childRecords.some((r) => r.syncState === 'pending');
+  const hasFailed = childRecords.some((r) => r.syncState === 'failed');
   const yesterdayKey = dayKeyOf(new Date(Date.now() - 86_400_000));
 
   // 兌換方案全部來自試算表的「兌換項目」，由便宜到貴排序。
@@ -222,6 +226,8 @@ export const KidView: React.FC<Props> = ({
               >
                 點
               </span>
+              {/* 分數裡有還在跟試算表核對的紀錄。萬一被拒絕、分數退回時，才不會像是自己變少 */}
+              {currentUser.unverified && <SyncMark state="pending" onDark />}
             </div>
 
             {currentUser.currentPoints < 0 && (
@@ -377,6 +383,23 @@ export const KidView: React.FC<Props> = ({
           </div>
         </div>
 
+        {(hasPending || hasFailed) && (
+          <div className="mt-3 space-y-1 text-[11px]">
+            {hasPending && (
+              <p className="flex items-center gap-1.5 text-slate-500">
+                <SyncMark state="pending" />
+                <span>正在跟試算表核對，完成後會自動消失</span>
+              </p>
+            )}
+            {hasFailed && (
+              <p className="flex items-center gap-1.5 text-rose-700 font-medium">
+                <SyncMark state="failed" />
+                <span>沒有寫進試算表，不計分，請家長到家長區處理</span>
+              </p>
+            )}
+          </div>
+        )}
+
         {/* Records List */}
         <div className="mt-4 flex flex-col gap-3">
           {filteredRecords.length === 0 ? (
@@ -475,11 +498,6 @@ export const KidView: React.FC<Props> = ({
                                 >
                                   {category}
                                 </span>
-                                {record.isLocal && (
-                                  <span className="text-[10px] bg-slate-100 text-slate-500 px-1 rounded">
-                                    剛建立
-                                  </span>
-                                )}
                               </div>
                               <div className="text-xs text-slate-400 mt-0.5 tabular-nums">
                                 {formattedTime}
@@ -495,18 +513,24 @@ export const KidView: React.FC<Props> = ({
                           </div>
 
                           <div className="text-right shrink-0">
-                            <div
-                              className={`text-base font-bold font-mono ${
-                                isRedeem
-                                  ? 'text-purple-600'
-                                  : isPositive
-                                  ? 'text-emerald-600'
-                                  : 'text-rose-600'
-                              }`}
-                            >
-                              {isPositive ? `+${record.points}` : record.points} 點
+                            <div className="flex items-center justify-end gap-1.5">
+                              {record.syncState && <SyncMark state={record.syncState} />}
+                              <div
+                                className={`text-base font-bold font-mono ${
+                                  isRedeem
+                                    ? 'text-purple-600'
+                                    : isPositive
+                                    ? 'text-emerald-600'
+                                    : 'text-rose-600'
+                                } ${record.syncState === 'failed' ? 'line-through opacity-50' : ''}`}
+                              >
+                                {isPositive ? `+${record.points}` : record.points} 點
+                              </div>
                             </div>
-                            {record.balanceAfter !== undefined && (
+                            {/* 沒寫進去的不計分，也就沒有「餘額」可言 */}
+                            {record.syncState === 'failed' ? (
+                              <div className="text-[11px] text-rose-600 font-medium">未寫入，不計分</div>
+                            ) : record.balanceAfter !== undefined && (
                               <div className="text-[11px] text-slate-400">
                                 餘額 {record.balanceAfter}
                               </div>

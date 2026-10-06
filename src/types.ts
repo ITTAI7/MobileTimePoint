@@ -136,18 +136,15 @@ export interface CleanUser {
   avatarColor?: string;
   password?: string;
   isAdmin?: boolean;
+  /** 分數裡含有還沒跟試算表核對完的紀錄（只出現在畫面用的資料上） */
+  unverified?: boolean;
 }
 
-/** 家長登記一筆積分的結果 */
-export interface SubmitRecordResult {
-  ok: boolean;
-  /**
-   * 送出了，但無法確認試算表有沒有寫進去。畫面必須跟「確定失敗」分開講 ——
-   * 說成「沒有寫入」的話家長會重登，萬一其實寫進去了就是重複計分。
-   */
-  uncertain?: boolean;
-  message?: string;
-}
+/**
+ * 還沒跟試算表核對完的紀錄狀態。
+ * pending：已經算進畫面，背景正在寫入／核對；failed：伺服器明確拒絕，沒寫進去，不計分。
+ */
+export type SyncState = 'pending' | 'failed';
 
 export interface CleanRecord {
   id: string;
@@ -160,4 +157,28 @@ export interface CleanRecord {
   balanceAfter: number;
   note?: string;
   isLocal?: boolean;
+  /** 只出現在畫面用的資料上；試算表讀回來的紀錄沒有這個欄位 */
+  syncState?: SyncState;
+  /** failed 時的原因 */
+  syncMessage?: string;
+}
+
+/** 登記後等著寫進試算表的一筆（存在手機裡，App 關掉再開會接著送） */
+export interface OutboxItem {
+  /** id 就是 LogID，重送時沿用同一個，伺服器才擋得掉重複 */
+  record: CleanRecord;
+  status: SyncState;
+  /**
+   * 送出過幾次。大於 0 代表伺服器可能已經收到 ——
+   * 下一次要先回讀試算表核對，確定沒有才重送。
+   */
+  attempts: number;
+  /**
+   * 連續沒成功的輪數（沒網路、收不到回覆、伺服器忙）。
+   * 掉一次回應很常見，核對一下就好；連續好幾輪才需要讓家長知道。
+   */
+  retries?: number;
+  /** pending 時：上次沒成功的原因（會自動重試）；failed 時：伺服器拒絕的原因 */
+  message?: string;
+  code?: string;
 }

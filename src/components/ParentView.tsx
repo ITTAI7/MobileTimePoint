@@ -1,34 +1,39 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { CleanUser, CleanTask, CleanRecord, SubmitRecordResult } from '../types';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { CleanUser, CleanTask, CleanRecord, OutboxItem } from '../types';
 import { taipeiParts, fromTaipei, todayTaipeiISO, getWeekRange } from '../utils/sheetData';
+import { SyncMark } from './SyncMark';
 import {
   Check,
   Plus,
   Minus,
   CheckCircle,
   ChevronDown,
-  Loader2,
   AlertTriangle,
   BookmarkPlus,
-  HelpCircle
+  CloudOff
 } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface Props {
+  /** 已疊上待送清單的分數（含還在核對中的） */
   users: CleanUser[];
   tasks: CleanTask[];
   selectedUserId: string;
   onSelectUser: (userId: string) => void;
-  onSubmitRecord: (
-    record: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
-  ) => Promise<SubmitRecordResult>;
+  /** 立刻生效：畫面馬上更新，寫入試算表在背景進行 */
+  onSubmitRecord: (record: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>) => void;
   onAddTask: (task: {
     category: string;
     name: string;
     points: number;
     note?: string;
   }) => Promise<{ ok: boolean; taskId?: string; message?: string }>;
-  isWritingToSheet?: boolean;
+  /** 被試算表拒絕、沒有寫進去的登記 */
+  failedItems: OutboxItem[];
+  /** 連續好幾輪都送不出去、還在自動重試的筆數 */
+  stuckCount: number;
+  onRetryFailed: (id: string) => void;
+  onDiscardFailed: (id: string) => void;
 }
 
 // 日期一律以台北時間解讀，與試算表、後端的「本週」一致（見 sheetData 的台北時間段落）
@@ -69,7 +74,10 @@ export const ParentView: React.FC<Props> = ({
   onSelectUser,
   onSubmitRecord,
   onAddTask,
-  isWritingToSheet = false,
+  failedItems,
+  stuckCount,
+  onRetryFailed,
+  onDiscardFailed,
 }) => {
   // Filter only children (exclude admin ADM)
   const childrenList = users.filter((u) => !u.isAdmin && u.id.toUpperCase() !== 'ADM' && u.name !== '家長');
@@ -112,10 +120,24 @@ export const ParentView: React.FC<Props> = ({
   // 只用來讓畫面在跨過午夜後重繪（日期欄、補登提示），送出時一律當場重算今天
   const [today, setToday] = useState(todayTaipeiISO);
   const recordDate = pickedDate ?? today;
-  const [submittedSuccess, setSubmittedSuccess] = useState(false);
-  // uncertain：送出了但無法確認有沒有寫進去，與「確定沒寫入」的說法必須不同
-  const [submitError, setSubmitError] = useState<{ message: string; uncertain: boolean } | null>(null);
+  // 剛登記的那一筆，顯示在按鈕下方幾秒。連續登記時新的蓋掉舊的，計時也重新開始
+  const [lastSubmitted, setLastSubmitted] = useState<{
+    /** 連續登記時讓提示重新淡入，看得出是新的一筆 */
+    at: number;
+    name: string;
+    taskName: string;
+    points: number;
+    before: number;
+  } | null>(null);
+  const lastSubmittedTimer = useRef<number | null>(null);
   const [taskSavedMessage, setTaskSavedMessage] = useState<string | null>(null);
+
+  useEffect(
+    () => () => {
+      if (lastSubmittedTimer.current !== null) clearTimeout(lastSubmittedTimer.current);
+    },
+    []
+  );
 
   useEffect(() => {
     const refresh = () => setToday(todayTaipeiISO());
@@ -182,13 +204,11 @@ export const ParentView: React.FC<Props> = ({
     setPointsChange((prev) => prev + delta);
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
 
     // 按鈕已停用，這裡再擋一次以防萬一
     if (insufficientPoints) return;
-
-    setSubmitError(null);
 
     const taskName = isCustom
       ? customTaskName.trim() || '自訂項目'
@@ -208,11 +228,12 @@ export const ParentView: React.FC<Props> = ({
       })
         .then((res) => {
           // onAddTask 成功後會直接更新任務清單，切回「任務選單」就看得到，不用重新載入
-          setTaskSavedMessage(
-            res.ok
-              ? `已新增至「任務與配分表」${res.taskId ? `（編號 ${res.taskId}）` : ''}，切到「任務選單」就能重複使用`
-              : res.message || '新增項目至試算表失敗'
-          );
+          const message = res.ok
+            ? `已新增至「任務與配分表」${res.taskId ? `（編號 ${res.taskId}）` : ''}，切到「任務選單」就能重複使用`
+            : res.message || '新增項目至試算表失敗';
+          setTaskSavedMessage(message);
+          // 新增項目要等試算表回覆，跟登記的提示分開計時；期間又存了別的項目就不要清掉新的訊息
+          setTimeout(() => setTaskSavedMessage((m) => (m === message ? null : m)), 6000);
         })
         .catch(() => {
           setTaskSavedMessage('新增項目至試算表失敗');
@@ -221,7 +242,7 @@ export const ParentView: React.FC<Props> = ({
       setTaskSavedMessage(null);
     }
 
-    const result = await onSubmitRecord({
+    onSubmitRecord({
       userId: currentChild.id,
       userName: currentChild.name,
       taskName,
@@ -232,20 +253,15 @@ export const ParentView: React.FC<Props> = ({
       timestamp: toTimestamp(pickedDate ?? todayTaipeiISO()),
     });
 
-    // 伺服器拒絕（例如另一台裝置搶先兌換掉點數）、或無法確認：顯示原因，不要報成功
-    if (!result.ok) {
-      setSubmitError({
-        message: result.message || '登記失敗，請重新整理後再試',
-        uncertain: !!result.uncertain,
-      });
-      return;
-    }
-
-    setSubmittedSuccess(true);
-    setTimeout(() => {
-      setSubmittedSuccess(false);
-      setTaskSavedMessage(null);
-    }, 4000);
+    setLastSubmitted({
+      at: Date.now(),
+      name: currentChild.name,
+      taskName,
+      points: pointsChange,
+      before: currentChild.currentPoints,
+    });
+    if (lastSubmittedTimer.current !== null) clearTimeout(lastSubmittedTimer.current);
+    lastSubmittedTimer.current = window.setTimeout(() => setLastSubmitted(null), 5000);
 
     setNote('');
     if (isCustom) {
@@ -264,6 +280,60 @@ export const ParentView: React.FC<Props> = ({
 
   return (
     <div className="space-y-4 pb-24 animate-in fade-in duration-200">
+      {/* 被試算表拒絕的登記：不計分，一直留著直到家長處理，不能自己消失 */}
+      {failedItems.length > 0 && (
+        <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2.5">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <p className="font-bold text-rose-800">
+              有 {failedItems.length} 筆沒有寫進試算表，不計分
+            </p>
+          </div>
+          {failedItems.map((item) => (
+            <div key={item.record.id} className="p-2.5 rounded-xl bg-white border border-rose-100">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-slate-800 min-w-0 truncate">
+                  {item.record.userName}｜{item.record.taskName}
+                </span>
+                <span className="font-mono font-bold text-rose-600 shrink-0 line-through">
+                  {item.record.points > 0 ? `+${item.record.points}` : item.record.points} 點
+                </span>
+              </div>
+              <p className="mt-1 text-rose-700">原因：{item.message || '試算表拒絕這筆登記'}</p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => onRetryFailed(item.record.id)}
+                  className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 active:scale-98 transition"
+                >
+                  再送一次
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDiscardFailed(item.record.id)}
+                  className="flex-1 py-1.5 rounded-lg bg-white border border-rose-300 text-rose-800 font-medium hover:bg-rose-50 transition"
+                >
+                  不要這筆
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* 連續好幾輪都送不出去（多半是沒網路）。分數已經算進畫面，只是試算表還沒有 */}
+      {stuckCount > 0 && (
+        <div className="p-3 rounded-2xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
+          <CloudOff className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-bold text-amber-800">還有 {stuckCount} 筆沒同步到試算表</p>
+            <p className="text-amber-800 mt-0.5">
+              網路不穩，會自動再試，不用重登。在同步完成之前，其他手機看不到這幾筆。
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Main Operation Form */}
       <form onSubmit={handleSubmit} className="p-5 rounded-3xl bg-white border border-slate-200/80 shadow-xs space-y-4">
         {/* Step 1: Select Child */}
@@ -287,8 +357,9 @@ export const ParentView: React.FC<Props> = ({
                 >
                   <div className="flex items-center justify-between">
                     <span className="font-bold text-sm">{user.name}</span>
-                    <span className="text-xs px-2 py-0.5 rounded-full bg-white font-mono font-bold text-blue-600 border border-slate-100">
+                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-white font-mono font-bold text-blue-600 border border-slate-100">
                       {user.currentPoints} 點
+                      {user.unverified && <SyncMark state="pending" />}
                     </span>
                   </div>
                   <div className="text-xs text-slate-500 mt-1 flex items-center justify-between">
@@ -593,74 +664,47 @@ export const ParentView: React.FC<Props> = ({
           </div>
         )}
 
-        {/* Submit Button */}
+        {/* Submit Button —— 按下立刻生效，不用等試算表，可以接著登記下一筆 */}
         <button
           type="submit"
-          disabled={(pointsChange === 0 && !isCustom) || isWritingToSheet || insufficientPoints}
+          disabled={(pointsChange === 0 && !isCustom) || insufficientPoints}
           className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-bold text-base shadow-md shadow-blue-500/25 hover:opacity-95 active:scale-98 transition flex items-center justify-center gap-2 disabled:opacity-50"
         >
-          {isWritingToSheet ? (
-            <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              <span>正在寫入並確認中，約需數秒...</span>
-            </>
-          ) : (
-            <>
-              <CheckCircle className="w-5 h-5" />
-              <span>確認登記積分 ({pointsChange >= 0 ? `+${pointsChange}` : pointsChange} 點)</span>
-            </>
-          )}
+          <CheckCircle className="w-5 h-5" />
+          <span>確認登記積分 ({pointsChange >= 0 ? `+${pointsChange}` : pointsChange} 點)</span>
         </button>
 
-        {/* 無法確認有沒有寫入：不能說成失敗，否則家長會重登而變成重複計分 */}
-        {submitError?.uncertain && (
-          <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-start gap-2.5">
-            <HelpCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-            <div>
-              <p className="font-bold text-amber-800">無法確認是否已登記</p>
-              <p className="text-amber-800 mt-0.5">{submitError.message}</p>
-              <p className="text-amber-900 font-semibold mt-1">
-                請先不要重登。等網路穩定後按右上角的重新整理，看小孩區有沒有這一筆（補登上週的要直接看試算表「點數存摺」），再決定要不要重登。
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* 確定沒有寫入（伺服器拒絕、或重讀試算表確認沒有這筆） */}
-        {submitError && !submitError.uncertain && (
-          <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs flex items-start gap-2.5">
-            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
-            <div>
-              <p className="font-bold text-rose-800">登記失敗</p>
-              <p className="text-rose-700 mt-0.5">{submitError.message}</p>
-              <p className="text-rose-600/80 mt-1">
-                試算表沒有寫入這筆，點數與紀錄都沒有變動。
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Feedback Alert */}
-        {submittedSuccess && (
+        {/* 剛登記的那筆：孩子的分數卡通常已經捲出畫面，所以把分數變化直接寫在這裡 */}
+        {lastSubmitted && (
           <motion.div
+            key={lastSubmitted.at}
             initial={{ opacity: 0, y: -5 }}
             animate={{ opacity: 1, y: 0 }}
             className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2.5"
           >
             <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <div className="space-y-1">
-              <p className="font-bold text-emerald-800">登記成功！</p>
-              <p className="text-emerald-700">
-                已確認寫入 Google Sheet『點數存摺』，畫面上的餘額就是試算表的實際數字。
+            <div className="space-y-1 min-w-0">
+              <p className="font-bold text-emerald-800">
+                已登記：{lastSubmitted.name}｜{lastSubmitted.taskName}{' '}
+                {lastSubmitted.points >= 0 ? `+${lastSubmitted.points}` : lastSubmitted.points} 點
               </p>
-              {taskSavedMessage && (
-                <p className="text-blue-700 font-medium flex items-center gap-1 mt-1">
-                  <BookmarkPlus className="w-3.5 h-3.5" />
-                  <span>{taskSavedMessage}</span>
-                </p>
-              )}
+              <p className="text-emerald-700 font-mono">
+                {lastSubmitted.before} → {lastSubmitted.before + lastSubmitted.points} 點
+              </p>
+              <p className="text-emerald-700/80 flex items-center gap-1.5">
+                <SyncMark state="pending" />
+                <span>紀錄旁的灰色「!」表示正在跟試算表核對，完成後會自動消失</span>
+              </p>
             </div>
           </motion.div>
+        )}
+
+        {/* 自訂項目存進配分表的結果，要等試算表回覆，與上面分開顯示 */}
+        {taskSavedMessage && (
+          <p className="px-1 text-xs text-blue-700 font-medium flex items-center gap-1">
+            <BookmarkPlus className="w-3.5 h-3.5 shrink-0" />
+            <span>{taskSavedMessage}</span>
+          </p>
         )}
       </form>
     </div>

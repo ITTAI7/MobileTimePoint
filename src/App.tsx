@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { CleanTask, CleanUser, CleanRecord, SheetAudit, RecalcResult, TrustedDevice, SubmitRecordResult } from './types';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { CleanTask, CleanUser, CleanRecord, SheetAudit, RecalcResult, TrustedDevice, OutboxItem } from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -30,7 +30,9 @@ import {
   todayTaipeiISO,
   INITIAL_TASKS_SEED,
   INITIAL_USERS_SEED,
+  WriteRecordResult,
 } from './utils/sheetData';
+import { getOutbox, saveOutbox, overlayOutbox, sortNewestFirst } from './utils/outbox';
 import { KidView } from './components/KidView';
 import { ParentView } from './components/ParentView';
 import { ParentPasswordModal } from './components/ParentPasswordModal';
@@ -58,13 +60,6 @@ import {
   ShieldCheck,
   Sparkles
 } from 'lucide-react';
-
-/** 依時間由新到舊排序（台北時間解讀，與畫面顯示一致） */
-function sortNewestFirst(records: CleanRecord[]): CleanRecord[] {
-  return [...records].sort(
-    (a, b) => parseSheetTime(b.timestamp).getTime() - parseSheetTime(a.timestamp).getTime()
-  );
-}
 
 /** 家長區解鎖後，App 退到背景超過這個時間，回來時自動上鎖 */
 const AUTO_LOCK_AFTER_MS = 5 * 60 * 1000;
@@ -102,7 +97,24 @@ export default function App() {
 
   const [showTasksModal, setShowTasksModal] = useState(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
-  const [isWritingToSheet, setIsWritingToSheet] = useState(false);
+
+  /* ─── 待送清單：登記後畫面立刻更新，背景再寫進試算表（見 utils/outbox.ts）─── */
+  const [outbox, setOutbox] = useState<OutboxItem[]>(() => getOutbox());
+  // 背景送出的迴圈要讀「此刻」的清單，不能等下一次渲染，所以另外用 ref 保存最新值
+  const outboxRef = useRef(outbox);
+  /** 改清單一律走這裡：ref、localStorage、畫面同步更新。先存進手機才送出，App 被關掉也不會遺失 */
+  const updateOutbox = useCallback((fn: (items: OutboxItem[]) => OutboxItem[]) => {
+    const next = fn(outboxRef.current);
+    outboxRef.current = next;
+    saveOutbox(next);
+    setOutbox(next);
+  }, []);
+
+  // users / records 只放試算表確認過的資料；畫面看到的是再疊上待送清單的結果
+  const { users: displayUsers, records: displayRecords } = useMemo(
+    () => overlayOutbox(users, records, outbox),
+    [users, records, outbox]
+  );
 
   const isOnline = useOnlineStatus();
 
@@ -364,6 +376,13 @@ export default function App() {
         : sortedRecords;
       setRecords(shownRecords);
 
+      // 試算表裡已經有的，就不必再等寫入的回應了（回應掉了、或讀取剛好比回應先回來）。
+      // 這裡的分數已經含有那筆，不移出清單的話畫面會算兩次。
+      const onSheet = new Set(sortedRecords.map((r) => r.id));
+      if (outboxRef.current.some((i) => onSheet.has(i.record.id))) {
+        updateOutbox((items) => items.filter((i) => !onSheet.has(i.record.id)));
+      }
+
       // On successful live sheet sync (especially manual refresh), keep local cache aligned with live sheet
       saveLocalLogs(shownRecords);
       const sheetUserPoints: Record<string, number> = {};
@@ -371,9 +390,6 @@ export default function App() {
         sheetUserPoints[u.id] = u.currentPoints;
       });
       saveLocalUsersOverride(sheetUserPoints);
-
-      // 供下次開啟時立刻繪製
-      saveCachedUsers(mergedUsers);
 
       return sortedRecords;
     } catch (err: unknown) {
@@ -403,11 +419,17 @@ export default function App() {
       loadsInFlight.current -= 1;
       if (loadsInFlight.current === 0) setIsRefreshing(false);
     }
-  }, []);
+  }, [updateOutbox]);
 
   useEffect(() => {
     loadData();
   }, [loadData]);
+
+  // 供下次開啟時立刻繪製。寫入確認後的分數也要存，
+  // 否則關掉再開時，會先顯示確認前的舊分數，等讀取回來才跳回正確的數字。
+  useEffect(() => {
+    if (hasFreshData) saveCachedUsers(users);
+  }, [users, hasFreshData]);
 
   // Handle Tab Switching with Password Check
   const handleTabClick = (targetTab: 'kid' | 'parent') => {
@@ -452,11 +474,7 @@ export default function App() {
 
   // 退到背景太久就自動上鎖：手機停在家長區放著過夜、或順手遞給小孩時，不會一直開著。
   // 只在回到畫面時判斷（背景中的計時器會被系統暫停，不可靠）。
-  // 正在寫入時不鎖，否則寫入結果的訊息會跟著家長區一起消失。
-  const isWritingRef = useRef(false);
-  useEffect(() => {
-    isWritingRef.current = isWritingToSheet;
-  }, [isWritingToSheet]);
+  // 登記的寫入在背景進行、結果記在待送清單裡，上鎖不會讓結果消失，所以不必等寫完。
   useEffect(() => {
     let hiddenAt: number | null = null;
     const onVisibilityChange = () => {
@@ -466,101 +484,230 @@ export default function App() {
       }
       const awayMs = hiddenAt === null ? 0 : Date.now() - hiddenAt;
       hiddenAt = null;
-      if (awayMs >= AUTO_LOCK_AFTER_MS && !isWritingRef.current) handleLockParentMode();
+      if (awayMs >= AUTO_LOCK_AFTER_MS) handleLockParentMode();
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () => document.removeEventListener('visibilitychange', onVisibilityChange);
     // handleLockParentMode 只用到 setState，每次渲染都等價，不需要列為相依
   }, []);
 
-  // Handle Parent Submitting a Point Adjustment Record
-  const handleParentSubmitRecord = async (
-    newRecordData: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
-  ): Promise<SubmitRecordResult> => {
-    // 一切以試算表為準：**先寫入、確認成功後才更新畫面**，不做樂觀更新。
-    // 代價是送出後要等約 3 秒；換來的是畫面上的數字必定與試算表一致。
-    const userToUpdate = users.find((u) => u.id === newRecordData.userId);
-    const prevPoints = userToUpdate ? userToUpdate.currentPoints : 0;
+  /* ─────────────── 登記積分：先顯示、背景寫入 ───────────────
+   * 按下登記，畫面立刻更新，紀錄放進待送清單，背景再一筆一筆寫進試算表。
+   * 試算表確認前，紀錄與總分旁有灰色「!」；確認後改用伺服器回傳的餘額，記號消失。
+   * 伺服器明確拒絕（例如兌換時另一台手機已先扣過點）就改成紅色「!」、不計分，留給家長處理。
+   *
+   * 依序送、一次一筆：存摺的餘額快照要照登記的先後算，同時送出的話順序沒有保證。
+   */
 
+  const sendingRef = useRef(false);
+  const retryTimerRef = useRef<number | null>(null);
+  const retryDelayRef = useRef(0);
+
+  /** 試算表確認寫入：改用伺服器的權威餘額，紀錄移出待送清單、併進確認過的資料 */
+  const commitConfirmed = (record: CleanRecord, result: WriteRecordResult) => {
+    // 在這之前發出、還沒回來的讀取都是寫入前的舊資料，回來時不能蓋掉這筆
+    markScreenNewest();
+
+    const confirmedBalance =
+      typeof result.newBalance === 'number' ? result.newBalance : undefined;
+    setUsers((prev) =>
+      prev.map((u) =>
+        u.id === record.userId
+          ? { ...u, currentPoints: confirmedBalance ?? u.currentPoints + record.points }
+          : u
+      )
+    );
+    if (confirmedBalance !== undefined) {
+      const userMap = getLocalUsersOverride();
+      userMap[record.userId] = confirmedBalance;
+      saveLocalUsersOverride(userMap);
+    }
+
+    const confirmedRecord: CleanRecord = {
+      ...record,
+      balanceAfter: confirmedBalance ?? record.balanceAfter,
+    };
+    // 先濾掉同一筆：期間若有其他讀取已經把它帶回來，不能出現兩次
+    const withConfirmed = (list: CleanRecord[]) =>
+      sortNewestFirst([confirmedRecord, ...list.filter((r) => r.id !== record.id)]);
+    setRecords(withConfirmed);
+    saveLocalLogs(withConfirmed(getLocalLogs()));
+
+    // 與上面的 setState 在同一輪合併繪製，畫面不會出現「清單已移除、分數還沒更新」的瞬間
+    updateOutbox((items) => items.filter((i) => i.record.id !== record.id));
+  };
+
+  /** 送出（或核對）一筆。回傳 'done'，或下一輪要重試的原因 */
+  const sendOutboxItem = async (item: OutboxItem): Promise<'done' | { retry: string }> => {
+    const id = item.record.id;
+    const removeItem = () => updateOutbox((items) => items.filter((i) => i.record.id !== id));
+    const patchItem = (patch: Partial<OutboxItem>) =>
+      updateOutbox((items) => items.map((i) => (i.record.id === id ? { ...i, ...patch } : i)));
+
+    // 送過但沒收到回覆：伺服器可能已經寫入。先回讀試算表核對，確定沒有才重送。
+    // （伺服器雖然會用 LogID 擋重複，但「先看再送」不必賭那一層一定有部署。）
+    // 一定要讀完整歷史：補登上週的那筆不會出現在「本週」的回應裡，只讀本週會誤判成沒寫入。
+    if (item.attempts > 0) {
+      const onSheet = await loadData(true, { allHistory: true });
+      if (onSheet === null) return { retry: '暫時連不上試算表，會自動再試' };
+      if (onSheet.some((r) => r.id === id)) {
+        removeItem();
+        return 'done';
+      }
+    }
+
+    // 先記下「送過了」再送：送到一半 App 被關掉，下次打開才知道要先核對
+    patchItem({ attempts: item.attempts + 1 });
+    const result = await writeRecordToGoogleSheet(item.record, item.record.balanceAfter);
+
+    if (result.success && result.confirmed) {
+      // 補登過去的日期：這筆在時間上排到中間，伺服器已經重算了其他列的「餘額」，
+      // 這筆當天的餘額也不是目前總分。前端拼湊不出正確的畫面，直接整份重讀試算表。
+      const isBackdated =
+        (result.snapshotsResynced ?? 0) > 0 ||
+        taipeiDateISO(parseSheetTime(item.record.timestamp)) !== todayTaipeiISO();
+      if (isBackdated) {
+        markScreenNewest();
+        if ((await loadData(true)) !== null) {
+          // 補登上週的不在本週的回應裡，讀取時移不掉，這裡明確移除
+          removeItem();
+          return 'done';
+        }
+        // 重讀失敗時寫入仍是確定成功的：先把這筆放進畫面，下次重新整理會校正各列餘額
+      }
+      commitConfirmed(item.record, result);
+      return 'done';
+    }
+
+    if (!result.success && result.confirmed) {
+      // 拿不到寫入鎖：伺服器什麼都沒做，確定沒寫入，稍後直接重送即可
+      if (result.code === 'BUSY') {
+        patchItem({ attempts: 0 });
+        return { retry: '試算表正忙，會自動再試' };
+      }
+      // 明確拒絕（點數不足、GAS 沒部署 doPost…）：重試也不會變，交給家長處理
+      patchItem({
+        status: 'failed',
+        attempts: 0,
+        retries: 0,
+        message: result.message || '試算表拒絕這筆登記',
+        code: result.code,
+      });
+      return 'done';
+    }
+
+    // 收不到回覆，不知道寫進去沒有 —— 不用猜，下一輪先核對再決定
+    return { retry: '收不到試算表的回覆，會自動再試' };
+  };
+
+  /**
+   * 把待送清單裡的 pending 依序送完。已經在跑就不重複開；
+   * 遇到連不上就停下來，間隔逐步拉長後再試（網路恢復、App 回到畫面時會立刻再試）。
+   */
+  const processOutbox = async () => {
+    if (sendingRef.current) return;
+    if (retryTimerRef.current !== null) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    sendingRef.current = true;
+    // 送出期間新版 App 接手也先不要重新載入（清單存在手機裡，重載不會遺失，只是要多核對一次）
+    markWriteStart();
+
+    let stalled = false;
+    try {
+      for (;;) {
+        const item = outboxRef.current.find((i) => i.status === 'pending');
+        if (!item) break;
+
+        let outcome: 'done' | { retry: string };
+        try {
+          outcome = await sendOutboxItem(item);
+        } catch (err) {
+          console.warn('Outbox send error:', err);
+          outcome = { retry: '發生錯誤，會自動再試' };
+        }
+
+        if (outcome !== 'done') {
+          const reason = outcome.retry;
+          updateOutbox((items) =>
+            items.map((i) =>
+              i.record.id === item.record.id
+                ? { ...i, retries: (i.retries ?? 0) + 1, message: reason }
+                : i
+            )
+          );
+          stalled = true;
+          break;
+        }
+      }
+    } finally {
+      sendingRef.current = false;
+      markWriteEnd();
+    }
+
+    if (stalled) {
+      retryDelayRef.current = Math.min(60_000, retryDelayRef.current ? retryDelayRef.current * 2 : 2_000);
+      retryTimerRef.current = window.setTimeout(() => {
+        retryTimerRef.current = null;
+        processOutbox();
+      }, retryDelayRef.current);
+    } else {
+      retryDelayRef.current = 0;
+    }
+  };
+
+  // 打開 App 時把上次沒送完的接著送；網路恢復、App 回到畫面時也立刻再試，不必等計時器。
+  // 這裡用的都是 ref 與 setState，取第一次渲染的 processOutbox 也不會讀到舊資料。
+  useEffect(() => {
+    processOutbox();
+    const retryNow = () => {
+      if (document.visibilityState === 'visible' && outboxRef.current.some((i) => i.status === 'pending')) {
+        processOutbox();
+      }
+    };
+    window.addEventListener('online', retryNow);
+    document.addEventListener('visibilitychange', retryNow);
+    return () => {
+      window.removeEventListener('online', retryNow);
+      document.removeEventListener('visibilitychange', retryNow);
+    };
+  }, []);
+
+  const handleParentSubmitRecord = (
+    newRecordData: Omit<CleanRecord, 'id' | 'balanceAfter' | 'isLocal'>
+  ) => {
     // timestamp 由表單決定（可以補登過去的日期），不是固定用「現在」
     // 加隨機碼：伺服器會用 LogID 去重（避免重送造成重複計分），
     // 只有毫秒的話，兩台裝置剛好同時送出就會被誤判成同一筆而靜默丟失。
     const logId = `L${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
-    const pendingRecord: CleanRecord = {
+    const shown = displayUsers.find((u) => u.id === newRecordData.userId);
+    const record: CleanRecord = {
       ...newRecordData,
       id: logId,
-      balanceAfter: prevPoints + newRecordData.points,
-      isLocal: true,
+      // 畫面上的餘額由待送清單依序推算；這個值只在伺服器找不到這個孩子時當備援
+      balanceAfter: (shown?.currentPoints ?? 0) + newRecordData.points,
     };
 
-    setIsWritingToSheet(true);
-    // 寫入與確認期間，新版 App 接手也先不要重新載入
-    markWriteStart();
-    try {
-      const result = await writeRecordToGoogleSheet(pendingRecord, pendingRecord.balanceAfter);
+    updateOutbox((items) => [...items, { record, status: 'pending', attempts: 0 }]);
+    processOutbox();
+  };
 
-      // 伺服器明確拒絕（例如兌換點數不足）——畫面完全沒動過，直接回報
-      if (!result.success && result.confirmed) {
-        return { ok: false, message: result.message || '寫入 Google Sheet 失敗' };
-      }
+  /** 被拒絕的那筆再送一次（沿用同一個 LogID）。伺服器明確拒絕過，確定沒寫入，不必先核對 */
+  const handleRetryFailed = (id: string) => {
+    updateOutbox((items) =>
+      items.map((i) =>
+        i.record.id === id && i.status === 'failed'
+          ? { ...i, status: 'pending', attempts: 0, retries: 0, message: undefined, code: undefined }
+          : i
+      )
+    );
+    processOutbox();
+  };
 
-      // 明確成功：用伺服器回傳的權威餘額更新，而不是前端自己加減出來的數字
-      if (result.success && result.confirmed) {
-        // 在這之前發出、還沒回來的讀取都是寫入前的舊資料，回來時不能蓋掉這筆
-        markScreenNewest();
-
-        // 補登過去的日期：這筆在時間上排到中間，伺服器已經重算了其他列的「餘額」，
-        // 而這筆當天的餘額也不是目前總分。前端拼湊不出正確的畫面，直接整份重讀試算表。
-        const isBackdated =
-          (result.snapshotsResynced ?? 0) > 0 ||
-          taipeiDateISO(parseSheetTime(pendingRecord.timestamp)) !== todayTaipeiISO();
-        if (isBackdated && (await loadData(true)) !== null) {
-          return { ok: true };
-        }
-        // 重讀失敗時寫入仍是確定成功的：先把這筆放進畫面，下次重新整理會校正餘額
-
-        const confirmedBalance =
-          typeof result.newBalance === 'number' ? result.newBalance : pendingRecord.balanceAfter;
-        const confirmedRecord: CleanRecord = { ...pendingRecord, balanceAfter: confirmedBalance };
-
-        setUsers((prev) =>
-          prev.map((u) =>
-            u.id === newRecordData.userId ? { ...u, currentPoints: confirmedBalance } : u
-          )
-        );
-        const userMap = getLocalUsersOverride();
-        userMap[newRecordData.userId] = confirmedBalance;
-        saveLocalUsersOverride(userMap);
-
-        // 先濾掉同一筆：期間若有其他讀取已經把它帶回來，不能出現兩次
-        const withConfirmed = (list: CleanRecord[]) =>
-          sortNewestFirst([confirmedRecord, ...list.filter((r) => r.id !== logId)]);
-        setRecords(withConfirmed);
-        saveLocalLogs(withConfirmed(getLocalLogs()));
-
-        return { ok: true };
-      }
-
-      // 不確定有沒有寫進去（轉址掉回應時約兩成機率）——
-      // 不要用猜的，直接回頭讀試算表看實際結果。
-      // 一定要讀完整歷史：補登上週的那筆不會出現在「本週」的回應裡，
-      // 只讀本週會把已經寫進去的誤判成沒寫入，家長照提示重登就變兩筆。
-      const refreshed = await loadData(true, { allHistory: true });
-      if (refreshed === null) {
-        return {
-          ok: false,
-          uncertain: true,
-          message: '已經送出，但收不到試算表的回覆，也暫時讀不到試算表，所以無法確認這筆有沒有寫進去。',
-        };
-      }
-      if (refreshed.some((r) => r.id === logId)) {
-        return { ok: true };
-      }
-      return { ok: false, message: '重新讀取試算表後確認沒有這一筆，可以再登記一次。' };
-    } finally {
-      markWriteEnd();
-      setIsWritingToSheet(false);
-    }
+  /** 放棄被拒絕的那筆。它本來就沒寫進試算表，也沒算進分數，移掉就好 */
+  const handleDiscardFailed = (id: string) => {
+    updateOutbox((items) => items.filter((i) => !(i.record.id === id && i.status === 'failed')));
   };
 
   // 新增自訂項目到「任務與配分表」。
@@ -903,8 +1050,8 @@ export default function App() {
           </div>
         ) : activeTab === 'kid' ? (
           <KidView
-            users={users}
-            records={records}
+            users={displayUsers}
+            records={displayRecords}
             tasks={tasks}
             selectedUserId={selectedUserId}
             onSelectUser={setSelectedUserId}
@@ -915,13 +1062,17 @@ export default function App() {
           <>
 
             <ParentView
-            users={users}
+            users={displayUsers}
             tasks={tasks}
             selectedUserId={selectedUserId}
             onSelectUser={setSelectedUserId}
             onSubmitRecord={handleParentSubmitRecord}
             onAddTask={handleAddTask}
-            isWritingToSheet={isWritingToSheet}
+            failedItems={outbox.filter((i) => i.status === 'failed')}
+            // 掉一次回應很常見，核對一下就好；連續兩輪以上沒成功才讓家長知道
+            stuckCount={outbox.filter((i) => i.status === 'pending' && (i.retries ?? 0) >= 2).length}
+            onRetryFailed={handleRetryFailed}
+            onDiscardFailed={handleDiscardFailed}
             />
           </>
         )}
