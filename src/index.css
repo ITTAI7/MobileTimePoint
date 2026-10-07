@@ -1,1 +1,15 @@
 @import "tailwindcss";
+
+/* 妹妹的 Tiffany 綠，Tailwind 沒有內建。300 是 Tiffany Blue（#81D8D0），500 是常見的 #0ABAB5 */
+@theme {
+  --color-tiffany-50: #effcfb;
+  --color-tiffany-100: #d4f5f1;
+  --color-tiffany-200: #ace9e3;
+  --color-tiffany-300: #81d8d0;
+  --color-tiffany-400: #45c6bf;
+  --color-tiffany-500: #0abab5;
+  --color-tiffany-600: #089b97;
+  --color-tiffany-700: #0b7c79;
+  --color-tiffany-800: #0f6361;
+  --color-tiffany-900: #115251;
+}

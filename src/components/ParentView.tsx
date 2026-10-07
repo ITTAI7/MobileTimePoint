@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { CleanUser, CleanTask, CleanRecord, OutboxItem } from '../types';
 import { taipeiParts, fromTaipei, todayTaipeiISO, getWeekRange } from '../utils/sheetData';
 import { SyncMark } from './SyncMark';
+import { themeOf } from '../utils/childTheme';
 import {
   Check,
   Plus,
@@ -322,9 +323,11 @@ export const ParentView: React.FC<Props> = ({
           <label className="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">
             步驟 1：選擇孩子
           </label>
+          {/* 跟孩子的分頁同一套配色：選中的用積分大卡片的漸層，沒選中的也看得出是誰 */}
           <div className="grid grid-cols-2 gap-2">
             {childrenList.map((user) => {
               const isSelected = user.id === currentChild.id;
+              const theme = themeOf(user);
               return (
                 <button
                   type="button"
@@ -332,21 +335,40 @@ export const ParentView: React.FC<Props> = ({
                   onClick={() => onSelectUser(user.id)}
                   className={`p-3 rounded-2xl border text-left transition-all relative ${
                     isSelected
-                      ? 'border-blue-600 bg-blue-50/70 text-blue-900 ring-2 ring-blue-600/20 shadow-xs'
-                      : 'border-slate-200 bg-slate-50/50 text-slate-700 hover:bg-slate-100'
+                      ? `bg-gradient-to-br ${theme.hero} border-transparent text-white shadow-md ${theme.shadow}`
+                      : `bg-white ${theme.lineStrong} ${theme.hover} text-slate-700`
                   }`}
                 >
-                  <div className="flex items-center justify-between">
-                    <span className="font-bold text-sm">{user.name}</span>
-                    <span className="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-white font-mono font-bold text-blue-600 border border-slate-100">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 min-w-0">
+                      <span
+                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold shrink-0 ${
+                          isSelected ? 'bg-white/25 text-white' : `${theme.avatar} text-white`
+                        }`}
+                      >
+                        {user.name.charAt(0)}
+                      </span>
+                      <span className={`font-bold text-sm truncate ${isSelected ? '' : theme.text}`}>
+                        {user.name}
+                      </span>
+                    </span>
+                    <span
+                      className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full font-mono font-bold shrink-0 ${
+                        isSelected ? 'bg-white/20 text-white' : `${theme.soft} ${theme.text}`
+                      }`}
+                    >
                       {user.currentPoints} 點
-                      {user.unverified && <SyncMark state="pending" />}
+                      {user.unverified && <SyncMark state="pending" onDark={isSelected} />}
                     </span>
                   </div>
-                  <div className="text-xs text-slate-500 mt-1 flex items-center justify-between">
+                  <div
+                    className={`text-xs mt-1 flex items-center justify-between ${
+                      isSelected ? 'text-white/80' : 'text-slate-500'
+                    }`}
+                  >
                     <span>{user.grade || '學生'}</span>
                     {isSelected && (
-                      <span className="text-blue-600 text-xs font-semibold flex items-center gap-0.5">
+                      <span className="text-white text-xs font-semibold flex items-center gap-0.5">
                         <Check className="w-3.5 h-3.5" /> 已選
                       </span>
                     )}

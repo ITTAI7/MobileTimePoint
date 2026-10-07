@@ -11,6 +11,7 @@ import {
 } from '../utils/sheetData';
 import { SyncMark } from './SyncMark';
 import { DeleteRecordDialog } from './DeleteRecordDialog';
+import { themeOf } from '../utils/childTheme';
 import {
   Sparkles, 
   Smartphone, 
@@ -22,7 +23,8 @@ import {
   Filter,
   CheckCircle2,
   Calendar,
-  MessageSquareText
+  MessageSquareText,
+  ChevronDown
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
@@ -30,8 +32,8 @@ interface Props {
   users: CleanUser[];
   records: CleanRecord[];
   tasks: CleanTask[];
+  /** 要顯示哪個孩子：由上方的分頁決定 */
   selectedUserId: string;
-  onSelectUser: (userId: string) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
   /** 只有家長解鎖時才會傳入：點紀錄會跳出刪除確認 */
@@ -43,12 +45,13 @@ export const KidView: React.FC<Props> = ({
   records,
   tasks,
   selectedUserId,
-  onSelectUser,
   onRefresh,
   isRefreshing,
   onDeleteRecord,
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'plus' | 'minus'>('all');
+  // 「週末可用手機時間」預設收起來，點箭頭才展開
+  const [showTimeInfo, setShowTimeInfo] = useState(false);
 
   // 家長點了要刪的那筆。上鎖（含自動上鎖）時一併關掉，否則再解鎖時確認框會自己跳回來
   const [confirmingDelete, setConfirmingDelete] = useState<CleanRecord | null>(null);
@@ -153,51 +156,19 @@ export const KidView: React.FC<Props> = ({
 
   return (
     <div className="space-y-4 pb-20">
-      {/* Child Switcher Pills */}
-      {availableUsers.length > 1 && (
-        <div className="flex items-center gap-2 p-1.5 bg-slate-200/70 rounded-2xl">
-          {availableUsers.map((user) => {
-            const isSelected = user.id === currentUser.id;
-            const userTheme = themeOf(user);
-            return (
-              <button
-                key={user.id}
-                onClick={() => onSelectUser(user.id)}
-                className={`flex-1 flex items-center justify-center gap-2 py-2.5 px-3 rounded-xl font-medium text-sm transition-all ${
-                  isSelected
-                    ? `bg-white ${userTheme.pillText} shadow-sm shadow-slate-200`
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
-                }`}
-              >
-                {/* 頭像一律用各自的顏色，沒選中時也看得出誰是誰 */}
-                <div
-                  className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold text-white ${
-                    isSelected ? userTheme.avatar : `${userTheme.avatar} opacity-40`
-                  }`}
-                >
-                  {user.name.charAt(0)}
-                </div>
-                <span>{user.name}</span>
-                {user.grade && (
-                  <span className="text-xs opacity-75 font-normal">({user.grade})</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
-      )}
-
       {/* Main Points & Screen Time Hero Card */}
       <motion.div
         layout
         initial={{ opacity: 0, y: 10 }}
         animate={{ opacity: 1, y: 0 }}
         key={currentUser.id}
-        className={`relative overflow-hidden rounded-3xl bg-gradient-to-br ${theme.hero} text-white p-6 shadow-xl ${theme.shadow} transition-colors duration-300`}
+        className={`relative overflow-hidden rounded-3xl bg-gradient-to-br ${theme.hero} text-white text-shadow-xs p-6 shadow-xl ${theme.shadow} transition-colors duration-300`}
       >
-        {/* Background decorative elements */}
-        <div className="absolute -top-12 -right-12 w-44 h-44 rounded-full bg-white/10 blur-2xl pointer-events-none" />
-        <div className="absolute -bottom-8 -left-8 w-36 h-36 rounded-full bg-white/10 blur-xl pointer-events-none" />
+        {/* 上半部一層白光、兩團柔光：讓顏色透亮，不是一片實心的色塊。
+            底色變亮後白字容易糊，卡片上的字都帶一層淡陰影（text-shadow-xs） */}
+        <div className="absolute inset-x-0 top-0 h-1/2 bg-gradient-to-b from-white/15 to-transparent pointer-events-none" />
+        <div className="absolute -top-12 -right-12 w-44 h-44 rounded-full bg-white/20 blur-2xl pointer-events-none" />
+        <div className="absolute -bottom-8 -left-8 w-36 h-36 rounded-full bg-white/15 blur-xl pointer-events-none" />
 
         <div className="relative z-10">
           <div className="flex items-center justify-between">
@@ -249,148 +220,108 @@ export const KidView: React.FC<Props> = ({
             )}
           </div>
 
-          {/* Screen Time Conversion Box */}
-          <div className="mt-6 p-4 rounded-2xl bg-white/15 backdrop-blur-md border border-white/15 text-white">
-            <div className="flex items-center gap-3">
-              <div className="w-11 h-11 rounded-xl bg-amber-400 text-amber-950 flex items-center justify-center shrink-0 shadow-md">
-                <Smartphone className="w-6 h-6" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-1 text-xs text-white/80 font-medium">
-                  <Clock className="w-3.5 h-3.5 text-amber-300" />
-                  <span>週末可用手機時間</span>
-                </div>
-                <div className="text-xl font-bold tracking-tight text-white mt-0.5 truncate">
-                  {timeInfo.text}
-                </div>
-              </div>
-            </div>
+          {/* 可換多少手機時間：預設收起來省空間，點一下展開 */}
+          <div className="mt-5 rounded-2xl bg-white/15 backdrop-blur-md border border-white/15 text-white">
+            <button
+              type="button"
+              onClick={() => setShowTimeInfo((v) => !v)}
+              aria-expanded={showTimeInfo}
+              aria-controls="kid-time-info"
+              className="w-full flex items-center justify-between gap-2 px-4 py-2.5 text-xs text-white/85 font-medium"
+            >
+              <span className="flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5 text-amber-300" />
+                <span>週末可用手機時間</span>
+              </span>
+              <ChevronDown
+                className={`w-4 h-4 transition-transform duration-300 ${showTimeInfo ? 'rotate-180' : ''}`}
+              />
+            </button>
 
-            {/* Next 30-min Target Progress */}
-            <div className="mt-3.5 pt-3 border-t border-white/15">
-              <div className="flex items-center justify-between text-xs text-white/80 mb-1.5">
-                <span className="flex items-center gap-1">
-                  <Sparkles className="w-3 h-3 text-amber-300" />
-                  <span>
-                    {cheapest
-                      ? `每 ${cheapest.cost} 點可兌換 ${shortRedeemLabel(cheapest.name)}`
-                      : '尚未設定兌換方案'}
-                  </span>
-                </span>
-                <span
-                  className={`px-2 py-0.5 rounded-full font-bold ${
-                    currentUser.currentPoints >= nextMilestone
-                      ? 'bg-emerald-400 text-emerald-950'
-                      : 'bg-amber-400 text-amber-950'
-                  }`}
-                >
-                  {currentUser.currentPoints >= nextMilestone
-                    ? '現在就可以兌換'
-                    : cheapest
-                    ? `再 ${pointsNeededForNext} 點可換 ${shortRedeemLabel(cheapest.name)}`
-                    : `再 ${pointsNeededForNext} 點`}
-                </span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-white/20 overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-gradient-to-r from-amber-300 to-emerald-300 transition-all duration-500"
-                  style={{ width: `${Math.min(100, Math.max(8, currentChunkProgress))}%` }}
-                />
+            {/* 0fr ↔ 1fr 讓高度跟著內容平滑展開，不用寫死高度 */}
+            <div
+              id="kid-time-info"
+              className={`grid transition-[grid-template-rows] duration-300 ${
+                showTimeInfo ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'
+              }`}
+            >
+              <div className="overflow-hidden">
+                <div className="px-4 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-11 h-11 rounded-xl bg-amber-400 text-amber-950 flex items-center justify-center shrink-0 shadow-md">
+                      <Smartphone className="w-6 h-6" />
+                    </div>
+                    <div className="text-xl font-bold tracking-tight text-white truncate">
+                      {timeInfo.text}
+                    </div>
+                  </div>
+
+                  {/* Next 30-min Target Progress */}
+                  <div className="mt-3.5 pt-3 border-t border-white/15">
+                    <div className="flex items-center justify-between text-xs text-white/80 mb-1.5">
+                      <span className="flex items-center gap-1">
+                        <Sparkles className="w-3 h-3 text-amber-300" />
+                        <span>
+                          {cheapest
+                            ? `每 ${cheapest.cost} 點可兌換 ${shortRedeemLabel(cheapest.name)}`
+                            : '尚未設定兌換方案'}
+                        </span>
+                      </span>
+                      <span
+                        className={`px-2 py-0.5 rounded-full font-bold ${
+                          currentUser.currentPoints >= nextMilestone
+                            ? 'bg-emerald-400 text-emerald-950'
+                            : 'bg-amber-400 text-amber-950'
+                        }`}
+                      >
+                        {currentUser.currentPoints >= nextMilestone
+                          ? '現在就可以兌換'
+                          : cheapest
+                          ? `再 ${pointsNeededForNext} 點可換 ${shortRedeemLabel(cheapest.name)}`
+                          : `再 ${pointsNeededForNext} 點`}
+                      </span>
+                    </div>
+                    <div className="w-full h-2 rounded-full bg-white/20 overflow-hidden">
+                      <div
+                        className="h-full rounded-full bg-gradient-to-r from-amber-300 to-emerald-300 transition-all duration-500"
+                        style={{ width: `${Math.min(100, Math.max(8, currentChunkProgress))}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </div>
       </motion.div>
 
-      {/* 兌換方案：全部讀自試算表的「兌換項目」 */}
-      {redeemTasks.length > 0 && (
-        <div className={`grid gap-2.5 ${redeemTasks.length <= 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
-          {redeemTasks.map((task) => {
-            const affordable = currentUser.currentPoints >= task.cost;
-            return (
-              <div
-                key={task.id}
-                title={task.name}
-                className={`p-3 rounded-2xl text-center transition ${
-                  affordable
-                    ? 'bg-emerald-50/60 border-2 border-emerald-400 shadow-sm shadow-emerald-500/10'
-                    : 'bg-white border border-slate-200/80 shadow-xs'
-                }`}
-              >
-                <p className="text-[11px] text-slate-500 font-medium truncate">
-                  兌換 {shortRedeemLabel(task.name)}
-                </p>
-                <p
-                  className={`text-base font-bold mt-0.5 ${
-                    affordable ? 'text-emerald-700' : 'text-slate-800'
-                  }`}
-                >
-                  {task.cost} 點
-                </p>
-                <div className="mt-1">
-                  <span
-                    className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      affordable
-                        ? 'bg-emerald-500 text-white shadow-sm'
-                        : 'bg-amber-400 text-amber-950'
-                    }`}
-                  >
-                    {/* 負分時差距要從負數起算：−3 到 10 是差 13，不是差 10 */}
-                    {affordable ? '可兌換' : `差 ${task.cost - currentUser.currentPoints} 點`}
-                  </span>
-                </div>
-              </div>
-            );
-          })}
+      {/* 本週紀錄：半透明的白卡片透出頁面的淡色，標題、日期、篩選用孩子的主色；加分綠、扣分紅、兌換紫是意思，不跟著換 */}
+      <div className={`rounded-3xl bg-white/70 backdrop-blur-sm border border-white shadow-sm ${theme.shadow} p-4`}>
+        <div className="flex items-center gap-2">
+          <div className={`w-8 h-8 rounded-xl bg-gradient-to-br ${theme.hero} text-white shadow-sm ${theme.shadow} flex items-center justify-center shrink-0`}>
+            <History className="w-4 h-4" />
+          </div>
+          <div className="min-w-0">
+            <h3 className={`font-bold text-base ${theme.text}`}>本週積分紀錄</h3>
+            <p className="text-xs text-slate-500">{formatWeekLabel(week)}</p>
+          </div>
         </div>
-      )}
 
-      {/* Recent Records Section (最近紀錄) */}
-      <div className="rounded-3xl bg-white border border-slate-200/80 shadow-xs p-5">
-        <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-          <div className="flex items-center gap-2">
-            <div className="w-8 h-8 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center">
-              <History className="w-4 h-4" />
-            </div>
-            <div>
-              <h3 className="font-semibold text-slate-800 text-base">本週積分紀錄</h3>
-              <p className="text-xs text-slate-500">{formatWeekLabel(week)}</p>
-            </div>
-          </div>
-
-          {/* Filter Pills */}
-          <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs">
+        {/* 篩選獨立一排：跟標題擠同一行時，手機上「扣分/兌換」會被折成兩行 */}
+        <div className={`mt-3 grid grid-cols-3 gap-1 p-1 rounded-xl bg-white border ${theme.line} text-xs`}>
+          {RECORD_FILTERS.map((f) => (
             <button
-              onClick={() => setFilterType('all')}
-              className={`px-2 py-1 rounded-lg font-medium transition ${
-                filterType === 'all'
-                  ? 'bg-white text-slate-800 shadow-xs'
+              key={f.key}
+              onClick={() => setFilterType(f.key)}
+              className={`py-1.5 rounded-lg font-semibold whitespace-nowrap transition ${
+                filterType === f.key
+                  ? `${theme.avatar} text-white shadow-xs`
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              全部
+              {f.label}
             </button>
-            <button
-              onClick={() => setFilterType('plus')}
-              className={`px-2 py-1 rounded-lg font-medium transition ${
-                filterType === 'plus'
-                  ? 'bg-white text-emerald-700 shadow-xs'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              加分
-            </button>
-            <button
-              onClick={() => setFilterType('minus')}
-              className={`px-2 py-1 rounded-lg font-medium transition ${
-                filterType === 'minus'
-                  ? 'bg-white text-rose-700 shadow-xs'
-                  : 'text-slate-500 hover:text-slate-700'
-              }`}
-            >
-              扣分/兌換
-            </button>
-          </div>
+          ))}
         </div>
 
         {hasFailed && (
@@ -401,40 +332,35 @@ export const KidView: React.FC<Props> = ({
         )}
 
         {canDelete && childRecords.length > 0 && (
-          <p className="mt-3 text-[11px] text-slate-400">點一下紀錄可以刪除</p>
+          <p className="mt-3 text-[11px] text-slate-500">點一下紀錄可以刪除</p>
         )}
 
         {/* Records List */}
-        <div className="mt-4 flex flex-col gap-3">
+        <div className="mt-3 flex flex-col gap-3">
           {filteredRecords.length === 0 ? (
             <div className="py-10 text-center">
-              <div className="w-12 h-12 mx-auto rounded-full bg-slate-100 text-slate-400 flex items-center justify-center mb-2">
+              <div className={`w-12 h-12 mx-auto rounded-full bg-white ${theme.text} flex items-center justify-center mb-2`}>
                 <CheckCircle2 className="w-6 h-6" />
               </div>
               <p className="text-sm font-medium text-slate-600">本週尚無積分明細</p>
               <p className="text-xs text-slate-400 mt-0.5">
-                家長可以在「家長操作區」記錄任務完成與加扣分！
+                家長可以在「家長」分頁記錄任務完成與加扣分！
               </p>
             </div>
           ) : (
             dayGroups.map((group) => {
               const isToday = group.key === todayKey;
-              const relLabel = isToday ? '今天' : group.key === yesterdayKey ? '昨天' : '';
 
               return (
                 <div
                   key={group.key}
-                  className={`rounded-2xl border px-3.5 pt-3 pb-1 ${
-                    isToday ? 'bg-blue-50/70 border-blue-100' : 'bg-slate-50 border-slate-100'
+                  className={`rounded-2xl bg-white border px-3.5 pt-3 pb-1 ${
+                    isToday ? `border-transparent ring-2 ${theme.ring}` : theme.line
                   }`}
                 >
-                  <div
-                    className={`flex items-center justify-between gap-2 pb-2 border-b ${
-                      isToday ? 'border-blue-100' : 'border-slate-200/70'
-                    }`}
-                  >
+                  <div className={`flex items-center justify-between gap-2 pb-2 border-b ${theme.line}`}>
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className="text-xl font-bold text-slate-800 leading-none tabular-nums">
+                      <span className={`text-xl font-bold leading-none tabular-nums ${theme.text}`}>
                         {group.label}
                       </span>
                       {group.weekday !== undefined && (
@@ -446,14 +372,12 @@ export const KidView: React.FC<Props> = ({
                           週{WEEKDAY_NAMES[group.weekday]}
                         </span>
                       )}
-                      {relLabel && (
-                        <span
-                          className={`text-xs font-semibold ${
-                            isToday ? 'text-blue-600' : 'text-slate-500'
-                          }`}
-                        >
-                          {relLabel}
+                      {isToday ? (
+                        <span className={`text-xs font-bold px-2 py-0.5 rounded-full text-white ${theme.avatar}`}>
+                          今天
                         </span>
+                      ) : group.key === yesterdayKey && (
+                        <span className="text-xs font-semibold text-slate-500">昨天</span>
                       )}
                     </div>
                     <span className="text-xs text-slate-400 shrink-0">
@@ -461,7 +385,7 @@ export const KidView: React.FC<Props> = ({
                     </span>
                   </div>
 
-                  <div className="divide-y divide-slate-200/60">
+                  <div className={`divide-y ${theme.divide}`}>
                     {group.records.map((record) => {
                       const category = resolveCategory(record);
                       // 兌換是開心的事（換到手機時間），不該跟扣分共用負面的紅色下箭頭
@@ -485,7 +409,7 @@ export const KidView: React.FC<Props> = ({
                             },
                           } : {})}
                           className={`py-2.5 flex items-center justify-between gap-3 ${
-                            canDelete ? 'cursor-pointer select-none active:bg-slate-200/50 transition-colors' : ''
+                            canDelete ? `cursor-pointer select-none ${theme.press} transition-colors` : ''
                           }`}
                         >
                           <div className="flex items-center gap-3 min-w-0">
@@ -606,6 +530,12 @@ function formatRecordTime(raw: string): string {
 
 const WEEKDAY_NAMES = ['日', '一', '二', '三', '四', '五', '六'];
 
+const RECORD_FILTERS: { key: 'all' | 'plus' | 'minus'; label: string }[] = [
+  { key: 'all', label: '全部' },
+  { key: 'plus', label: '加分' },
+  { key: 'minus', label: '扣分/兌換' },
+];
+
 /** 台北日期的分組鍵，例如 2026-9-28 */
 function dayKeyOf(d: Date): string {
   const p = taipeiParts(d);
@@ -651,55 +581,6 @@ function weekdayChipColor(weekday: number): string {
   if (weekday === 6) return 'bg-amber-100 text-amber-800';
   if (weekday === 0) return 'bg-rose-100 text-rose-700';
   return 'bg-slate-200/70 text-slate-600';
-}
-
-/**
- * 每個孩子一套配色，切換時一眼看得出畫面換了人。
- * 色票來自 parseCleanUsers 指派的 avatarColor（依使用者表的順序輪流）。
- * Tailwind 需要完整的類別字串才掃得到，所以不能用字串拼接。
- */
-interface ChildTheme {
-  hero: string;
-  shadow: string;
-  pillText: string;
-  avatar: string;
-}
-
-const CHILD_THEMES: Record<string, ChildTheme> = {
-  blue: {
-    hero: 'from-blue-600 via-indigo-600 to-violet-700',
-    shadow: 'shadow-blue-500/25',
-    pillText: 'text-blue-700',
-    avatar: 'bg-blue-600',
-  },
-  emerald: {
-    hero: 'from-emerald-500 via-teal-600 to-cyan-700',
-    shadow: 'shadow-emerald-500/25',
-    pillText: 'text-emerald-700',
-    avatar: 'bg-emerald-600',
-  },
-  amber: {
-    hero: 'from-amber-500 via-orange-500 to-rose-500',
-    shadow: 'shadow-amber-500/25',
-    pillText: 'text-amber-700',
-    avatar: 'bg-amber-500',
-  },
-  purple: {
-    hero: 'from-purple-600 via-fuchsia-600 to-pink-600',
-    shadow: 'shadow-purple-500/25',
-    pillText: 'text-purple-700',
-    avatar: 'bg-purple-600',
-  },
-  rose: {
-    hero: 'from-rose-500 via-pink-600 to-fuchsia-700',
-    shadow: 'shadow-rose-500/25',
-    pillText: 'text-rose-700',
-    avatar: 'bg-rose-600',
-  },
-};
-
-function themeOf(user?: { avatarColor?: string }): ChildTheme {
-  return CHILD_THEMES[user?.avatarColor || 'blue'] || CHILD_THEMES.blue;
 }
 
 /** 「兌換30分鐘手機時間」→「30分鐘」；認不出格式就原樣顯示 */

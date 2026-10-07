@@ -57,6 +57,7 @@ import { TasksTableModal } from './components/TasksTableModal';
 import { SettingsModal } from './components/SettingsModal';
 import { PWAInstallButton } from './components/PWAInstallButton';
 import { markWriteStart, markWriteEnd } from './utils/appUpdate';
+import { themeOf } from './utils/childTheme';
 import { useOnlineStatus } from './hooks/useOnlineStatus';
 import {
   isBiometricAvailable,
@@ -74,8 +75,7 @@ import {
   Info,
   Lock,
   Unlock,
-  ShieldCheck,
-  Sparkles
+  ShieldCheck
 } from 'lucide-react';
 
 /** 家長區解鎖後，App 退到背景超過這個時間，回來時自動上鎖 */
@@ -132,6 +132,12 @@ export default function App() {
     () => overlayOutbox(users, records, outbox),
     [users, records, outbox]
   );
+
+  // 上方分頁每個孩子一格，名字跟著試算表的使用者表走
+  const kidsList = displayUsers.filter((u) => !u.isAdmin && u.id.toUpperCase() !== 'ADM' && u.name !== '家長');
+  const kidTabs = kidsList.length > 0 ? kidsList : displayUsers;
+  // 與 KidView 的退路一致：選取的孩子不在名單上（例如快取的名單還沒換新）時，畫面顯示的是第一個
+  const shownKidId = kidTabs.some((u) => u.id === selectedUserId) ? selectedUserId : kidTabs[0]?.id;
 
   const isOnline = useOnlineStatus();
 
@@ -894,7 +900,12 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-100/70 text-slate-900 font-sans flex flex-col justify-between selection:bg-blue-600 selection:text-white">
+    <div
+      className={`min-h-screen ${
+        // 孩子的分頁整頁換成他的淡色，家長分頁維持中性灰
+        activeTab === 'kid' ? themeOf(kidTabs.find((u) => u.id === shownKidId)).page : 'bg-slate-100/70'
+      } transition-colors duration-300 text-slate-900 font-sans flex flex-col justify-between selection:bg-blue-600 selection:text-white`}
+    >
       {/* Top Mobile Header */}
       <header className="sticky top-0 z-40 bg-white/95 backdrop-blur-md border-b border-slate-200/80 shadow-xs">
         <div className="max-w-md mx-auto px-4 py-2.5 flex items-center justify-between">
@@ -949,12 +960,12 @@ export default function App() {
               <Settings className="w-4 h-4" />
             </button>
 
-            {/* 上鎖：只在家長模式已解鎖時出現，點一下就退出並回到小孩檢視區 */}
+            {/* 上鎖：只在家長模式已解鎖時出現，點一下就退出並回到孩子的分頁 */}
             {isParentUnlocked && (
               <button
                 onClick={handleLockParentMode}
                 className="p-2 rounded-xl bg-orange-100 text-orange-700 hover:bg-orange-200 transition active:scale-95"
-                title="上鎖並返回小孩檢視區"
+                title="上鎖並返回孩子的分頁"
               >
                 <Lock className="w-4 h-4" />
               </button>
@@ -962,40 +973,58 @@ export default function App() {
           </div>
         </div>
 
-        {/* Top Navigation Tabs: Kid View vs Parent Operation Zone */}
+        {/* 上方分頁：每個孩子一格，與家長並列。欄數跟著孩子人數走 */}
         <div className="max-w-md mx-auto px-4 pb-2.5">
-          <div className="grid grid-cols-2 gap-1.5 p-1 bg-slate-100 rounded-2xl border border-slate-200/60">
-            <button
-              id="tab-kid-view"
-              onClick={() => handleTabClick('kid')}
-              className={`py-2 px-3 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 ${
-                activeTab === 'kid'
-                  ? 'bg-white text-blue-700 shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-              <span>小孩檢視區</span>
-            </button>
+          <div
+            className="grid gap-1 p-1 bg-slate-100 rounded-2xl border border-slate-200/60"
+            style={{ gridTemplateColumns: `repeat(${kidTabs.length + 1}, minmax(0, 1fr))` }}
+          >
+            {kidTabs.map((kid) => {
+              const isActive = activeTab === 'kid' && kid.id === shownKidId;
+              const kidTheme = themeOf(kid);
+              return (
+                <button
+                  key={kid.id}
+                  id={`tab-kid-${kid.id}`}
+                  onClick={() => {
+                    setSelectedUserId(kid.id);
+                    handleTabClick('kid');
+                  }}
+                  className={`py-2 px-2 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${
+                    isActive
+                      ? `bg-white ${kidTheme.text} shadow-xs`
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  {/* 頭像一律用各自的顏色，沒選中時也看得出誰是誰 */}
+                  <span
+                    className={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0 ${kidTheme.avatar} ${
+                      isActive ? '' : 'opacity-40'
+                    }`}
+                  >
+                    {kid.name.charAt(0)}
+                  </span>
+                  <span className="truncate">{kid.name}</span>
+                </button>
+              );
+            })}
 
+            {/* 三格並列放不下「密碼」小標籤，鎖頭圖示就代表要密碼 */}
             <button
               id="tab-parent-view"
               onClick={() => handleTabClick('parent')}
-              className={`py-2 px-3 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 ${
+              className={`py-2 px-2 rounded-xl font-bold text-xs sm:text-sm transition-all flex items-center justify-center gap-1.5 whitespace-nowrap ${
                 activeTab === 'parent'
                   ? 'bg-white text-orange-600 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
               {isParentUnlocked ? (
-                <Unlock className="w-3.5 h-3.5 text-emerald-500" />
+                <Unlock className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
               ) : (
-                <Lock className="w-3.5 h-3.5 text-orange-400" />
+                <Lock className="w-3.5 h-3.5 text-orange-400 shrink-0" />
               )}
-              <span>家長操作區</span>
-              {!isParentUnlocked && (
-                <span className="text-[10px] bg-orange-100 text-orange-700 px-1 rounded font-normal">密碼</span>
-              )}
+              <span className="truncate">家長</span>
             </button>
           </div>
         </div>
@@ -1173,7 +1202,6 @@ export default function App() {
             records={displayRecords}
             tasks={tasks}
             selectedUserId={selectedUserId}
-            onSelectUser={setSelectedUserId}
             onRefresh={() => loadData(true)}
             isRefreshing={isRefreshing}
             // 只有解鎖的家長點紀錄才會跳出刪除確認；小孩點了沒有反應

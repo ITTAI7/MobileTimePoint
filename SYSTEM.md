@@ -117,7 +117,8 @@ dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
 | 2.1.0 | `41505fd` | 標題顯示版本號、新版自動換新 |
 | 2.2.0 | `be1be5f` | 登記立即顯示、背景寫入試算表（核對中灰色 !、被拒絕紅色 !） |
 | 2.2.1 | `3b93982` | 登記提示精簡為一行「已登記」、2 秒消失，不再解釋寫入狀態 |
-| 2.3.0 | — | 家長解鎖後在小孩區點紀錄可以刪除（試算表標記刪除時間，不真的刪列） |
+| 2.3.0 | `dc046c1` | 家長解鎖後在小孩區點紀錄可以刪除（試算表標記刪除時間，不真的刪列） |
+| 2.4.0 | — | 上方分頁改成「哥哥｜妹妹｜家長」並列，拿掉小孩區裡的切換列與兌換卡片，「週末可用手機時間」改成預設收起；本週紀錄與家長區選孩子的卡片跟著各自的配色（哥哥海洋藍、妹妹 Tiffany 綠） |
 
 **新版自動換新**：`src/utils/appUpdate.ts` 在新的 Service Worker 接手（`controllerchange`）時重新載入，打開一次就換成新版。
 背景送出待送清單、新增配分項目的期間不重載，改成等 App 退到背景時再換 —— 中斷寫入就得多核對一次。
@@ -358,11 +359,12 @@ src/
   types.ts                   試算表原始欄位 → 乾淨型別的對應
   utils/sheetData.ts         資料層：API 讀寫、欄位容錯解析、週區間、localStorage 快取
   utils/outbox.ts            待送清單：存取、把未確認的登記與刪除疊到畫面上（overlayOutbox）
+  utils/childTheme.ts        每個孩子一套配色（分頁、積分卡片、本週紀錄、家長區選孩子共用）
   utils/biometric.ts         WebAuthn 平台驗證器：註冊／驗證指紋，錯誤訊息中文化
   components/
-    KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細（家長解鎖時點紀錄可刪除）
+    KidView.tsx              孩子的分頁：積分與可換時間、本週明細（家長解鎖時點紀錄可刪除）
     DeleteRecordDialog.tsx   刪除確認框：這筆的內容與刪除後剩幾點
-    ParentView.tsx           家長操作區：分類選單、加扣分、兌換透支檢查
+    ParentView.tsx           家長分頁：分類選單、加扣分、兌換透支檢查
     SettingsModal.tsx        API 網址、改密碼、家長裝置名單、清除本機快取（都要家長解鎖後才顯示）
     TasksTableModal.tsx      配分表檢視
     ParentPasswordModal.tsx    家長區解鎖（密碼雜湊比對／指紋）

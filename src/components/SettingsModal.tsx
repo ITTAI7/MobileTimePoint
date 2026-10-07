@@ -202,7 +202,7 @@ export const SettingsModal: React.FC<Props> = ({
           {!isParentUnlocked && (
             <p className="p-3 rounded-2xl bg-slate-50 border border-slate-200 text-[11px] text-slate-500 flex items-start gap-1.5 leading-relaxed">
               <Lock className="w-3.5 h-3.5 shrink-0 mt-px" />
-              修改密碼、家長裝置{allowConnectionSettings ? '' : '、連線網址'}與清除資料，要先用密碼進入「家長操作區」才會出現。
+              修改密碼、家長裝置{allowConnectionSettings ? '' : '、連線網址'}與清除資料，要先用密碼進入「家長」分頁才會出現。
             </p>
           )}
 
@@ -275,7 +275,7 @@ export const SettingsModal: React.FC<Props> = ({
                       <span>家長操作專區存取密碼</span>
                     </p>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      切換至「家長操作區」登記點數時需輸入此密碼。
+                      切換至「家長」分頁登記點數時需輸入此密碼。
                     </p>
                   </div>
 
