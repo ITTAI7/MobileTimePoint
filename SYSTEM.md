@@ -36,6 +36,19 @@ Google 試算表（3 個分頁，唯一的資料來源）
 沒網路時逐步拉長間隔重試，網路恢復或 App 回到畫面時立刻再試。App 關掉再開會接著送。
 代價：寫入完成前，其他手機看不到這筆。
 
+**刪除紀錄也走待送清單**（2.3 起）。家長解鎖後在小孩區點一筆紀錄 → 確認框 → 刪除，
+畫面立刻拿掉那筆、總分先扣回（灰色「!」），背景再送 `deleteLog`，確認後整份重讀（後面每列的餘額都變了）。
+**試算表不真的刪列**，只在「點數存摺」的 `Deleted_At (刪除時間)` 欄填上時間；有填的列一律當作不存在。
+待送清單的每一項是「動作（`kind`：add／delete）＋ LogID」，同一筆可能同時有登記和排在後面的刪除：
+
+| 要刪的那筆 | 處理 |
+|---|---|
+| 試算表上已經有 | 排一個 delete 依序送。刪除是冪等的，收不到回應就直接重送，不必先核對 |
+| 登記還在清單裡、一次都沒送過（`attempts` 為 0） | 直接從清單拿掉，不打 API |
+| 登記已送出、還沒確認 | delete 排在它後面，清單依序送，不會比登記先到 |
+| 登記被拒絕（紅色「!」） | 直接從清單拿掉（等同「不要這筆」） |
+| 刪除被拒絕（例如 GAS 還是舊版） | 那筆照常顯示、照常計分；家長區出現「刪除沒成功」，可「再刪一次／不刪了」 |
+
 ---
 
 ## 2. 技術棧
@@ -103,7 +116,8 @@ dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
 | 2.0.0 | `ef4c1a0` | 密碼不再明文公開（舊版 App 會進不了家長區）＋第二輪審查 11 題 |
 | 2.1.0 | `41505fd` | 標題顯示版本號、新版自動換新 |
 | 2.2.0 | `be1be5f` | 登記立即顯示、背景寫入試算表（核對中灰色 !、被拒絕紅色 !） |
-| 2.2.1 | — | 登記提示精簡為一行「已登記」、2 秒消失，不再解釋寫入狀態 |
+| 2.2.1 | `3b93982` | 登記提示精簡為一行「已登記」、2 秒消失，不再解釋寫入狀態 |
+| 2.3.0 | — | 家長解鎖後在小孩區點紀錄可以刪除（試算表標記刪除時間，不真的刪列） |
 
 **新版自動換新**：`src/utils/appUpdate.ts` 在新的 Service Worker 接手（`controllerchange`）時重新載入，打開一次就換成新版。
 背景送出待送清單、新增配分項目的期間不重載，改成等 App 退到背景時再換 —— 中斷寫入就得多核對一次。
@@ -173,9 +187,21 @@ dist/sw.js  dist/workbox-*.js            （PWA，precache 15 項 / 480 KiB）
 重新部署務必走：**部署 → 管理部署作業 → 選現有部署 → 編輯（鉛筆）→ 版本選「新版本」→ 部署**。
 使用「新增部署作業」會產生**全新的 `/exec` 網址**，舊網址立即 404，前端會整個連不上。
 
+**部署後一定要核對**：`node scripts/verify-gas.mjs`（只讀，不碰試算表）。
+它呼叫 `doGet ?action=version` 取得線上每個函式原始碼的指紋，跟本機 `gas/Code.gs` 逐一比對，
+貼錯檔、少貼一段、只存檔沒部署新版本都會被抓出來，並指出是哪個函式。
+回應與寫入結果相同的改動（例如效能優化）從外面看不出差別，這是唯一能確認的方法。
+新增的設定值（非函式的全域變數）要加進 `Code.gs` 的 `VERIFIED_CONSTANTS_` 才會被比對。
+
 **改到 doGet 回傳格式時，部署順序是「先前端、後 GAS」。**
 前端要先寫成新舊格式都能讀，推上 Vercel、每支手機打開一次 App 拿到新版之後，才部署 GAS。
 反過來的話，還沒更新的手機會讀不懂新格式 —— 例如密碼改成雜湊那次，舊前端會以為沒有設定密碼，家長區就進不去了。
+
+**新增寫入動作時則是「先 GAS、後前端」**（例如 2.3 的 `deleteLog`）。
+2.3 以前的 GAS 遇到不認得的 `action` 會落到 `addLog`：LogID 已存在時回「成功」但什麼都沒做，
+LogID 不存在時還會**追加一列空白紀錄**。所以要先部署 GAS、跑核對確認一致，才推前端。
+前端另外有一道保險：`deleteLog` 的回應沒有 `deleted: true` 就當成沒刪成功。
+2.3 起的 GAS 遇到不認得的 `action` 一律回 `UNKNOWN_ACTION`，以後再加新動作就不會有這個問題。
 
 ### 讀取
 
@@ -222,6 +248,7 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
 | `addLog`（省略時的預設） | 新增一筆點數異動，並同步更新使用者餘額 | **是**（以 `logId` 去重） |
 | `addTask` | 新增任務項目，編號由伺服器接續產生 | **否** |
 | `updateLog` | 依 `logId` 修改既有紀錄的 `timestamp` / `taskName` / `note` | 是 |
+| `deleteLog` | 依 `logId` 標記刪除（填 `Deleted_At (刪除時間)`）、從總分扣回、重算該孩子的餘額快照。回應一定帶 `deleted: true` 與 `newBalance` | **是**（已刪過的回成功、帶 `alreadyDeleted`，不再扣分） |
 | `updatePassword` | 更新 ADM 的密碼（需 `oldPassword`、`newPassword`） | 是（已是新密碼時直接回成功） |
 | `recalculate` | 以存摺為準重算所有餘額，可帶 `dryRun` | 是 |
 | `registerDevice` | 登記一支受信任裝置（需 `password`、`credentialId`、`label`） | 是 |
@@ -229,7 +256,8 @@ GET  {EXEC_URL}?range=all    → 回傳完整歷史
 
 回應一律是 `{"status": "success"|"error", ...}`。錯誤時可能帶 `code`：
 `INSUFFICIENT_POINTS`（兌換透支）、`LOG_NOT_FOUND`、`BUSY`（拿不到寫入鎖）、
-`BAD_PASSWORD`（裝置操作的密碼不符）、`DEVICE_LIMIT`（受信任裝置已達 2 支）。
+`BAD_PASSWORD`（裝置操作的密碼不符）、`DEVICE_LIMIT`（受信任裝置已達 2 支）、`UNKNOWN_ACTION`（不認得的動作）。
+沒帶 `action` 仍當成 `addLog`（相容很舊的 App）。
 
 ### 呼叫時的兩個陷阱
 
@@ -263,6 +291,9 @@ curl -sk -L --data-binary @payload.json \
 - **扣分可累計負分**，不受上述限制（刻意的設計）。
 - **餘額由伺服器計算**（讀試算表現值 + 異動量），不採用前端送來的 `newBalance`。
 - **所有寫入包在 `LockService` 內**，確保「讀現值 → 判斷 → 寫回」不可分割。
+- **已刪除的列（`Deleted_At` 有值）一律當作不存在**：doGet 不回傳（舊版 App 也看不到）、對帳與重新計算都不算、
+  餘額快照重算時跳過、它自己的餘額欄停在刪除當時不再改。**唯一的例外是 LogID 去重**：被刪掉的那筆重送 `addLog` 不會加回來。
+  這一欄第一次刪除時自動加在存摺最右邊。刪錯要救回：清掉那格 → App 出現「積分與明細對不上」→ 按「以存摺為準重新計算」。
 - **`addLog` 整張存摺只讀一次**（2026-10-06 起），LogID 去重與餘額快照重算都在記憶體裡做。
   跟試算表每來回一次要 0.3～0.5 秒；**不要在寫入之後再讀試算表**，那會逼試算表先把寫入送出去，整筆多等一秒以上。
 - **裝置登記／移除一律在伺服器驗家長密碼**，空密碼直接拒絕。否則任何人直接打 API 就能佔滿兩個名額，或把家長的手機踢掉。
@@ -280,6 +311,8 @@ curl -sk -L --data-binary @payload.json \
 | doGet 輸出 key | Apps Script 的 `OUTPUT_KEYS` | **必須維持 `積分明細/點數存摺`**，前端讀這個名稱。與試算表分頁實際叫什麼無關 |
 | 試算表分頁名 | Apps Script 的 `SHEET_NAMES` | 分頁改名只需改這裡。目前容許 `點數存摺` / `積分明細/點數存摺` 兩種 |
 | 試算表欄位名 | 兩邊都有 | 前端 `parseClean*` 與後端 `findCol_` 都靠欄位名比對 |
+| 刪除欄 | 只在後端（`DELETED_HEADER`，以 `Deleted`／`刪除` 比對） | doGet 回傳前就拿掉已刪除的列與這一欄，前端看不到它 |
+| `deleteLog` 的 `deleted: true` | 後端回應 → 前端 `deleteRecordInGoogleSheet` | 前端靠它分辨「真的刪了」與「舊版 GAS 當成登記、回了假的成功」 |
 | 受信任裝置 | 後端 ScriptProperties `trusted_devices_v1` | 前端以 `credentialId` 比對。**本機憑證必須同時在伺服器名單上才算受信任** —— 只看 localStorage 的話，偽造一筆就能繞過 |
 | 週的定義 | 前後端各一份 | 前端 `getWeekRange()`、後端 `weekRange_()`，皆為「週日 00:00 起、下週日 00:00 止」，邏輯必須一致 |
 | 密碼雜湊的鹽 | 前端 `sheetData.ts` 的 `HASH_SALT`、後端的 `PASSWORD_HASH_SALT` | 兩邊必須完全相同，否則任何密碼都解不了鎖。改了鹽，所有裝置的本機雜湊也會失效，要重新連線一次 |
@@ -321,13 +354,14 @@ curl -sk -L --data-binary @payload.json \
 
 ```
 src/
-  App.tsx                    狀態容器：載入資料、背景送出待送清單、密碼鎖與裝置名單
+  App.tsx                    狀態容器：載入資料、背景送出待送清單（登記與刪除）、密碼鎖與裝置名單
   types.ts                   試算表原始欄位 → 乾淨型別的對應
   utils/sheetData.ts         資料層：API 讀寫、欄位容錯解析、週區間、localStorage 快取
-  utils/outbox.ts            待送清單：存取、把未確認的登記疊到畫面上（overlayOutbox）
+  utils/outbox.ts            待送清單：存取、把未確認的登記與刪除疊到畫面上（overlayOutbox）
   utils/biometric.ts         WebAuthn 平台驗證器：註冊／驗證指紋，錯誤訊息中文化
   components/
-    KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細
+    KidView.tsx              小孩檢視區：積分、兌換卡片、本週明細（家長解鎖時點紀錄可刪除）
+    DeleteRecordDialog.tsx   刪除確認框：這筆的內容與刪除後剩幾點
     ParentView.tsx           家長操作區：分類選單、加扣分、兌換透支檢查
     SettingsModal.tsx        API 網址、改密碼、家長裝置名單、清除本機快取（都要家長解鎖後才顯示）
     TasksTableModal.tsx      配分表檢視
@@ -336,5 +370,6 @@ src/
     PWAInstallButton.tsx
   hooks/                     useOnlineStatus、usePWAInstall
 scripts/generate-icons.js    產生 PWA 圖示的一次性工具
+scripts/verify-gas.mjs       核對 Apps Script 部署中的版本是否與本機 gas/Code.gs 一致
 vercel.json                  Vercel 快取標頭設定（Service Worker 不可長快取）
 ```

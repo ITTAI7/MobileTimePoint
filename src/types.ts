@@ -163,9 +163,17 @@ export interface CleanRecord {
   syncMessage?: string;
 }
 
-/** 登記後等著寫進試算表的一筆（存在手機裡，App 關掉再開會接著送） */
+/**
+ * 待送清單裡的動作。add：登記這筆；delete：刪掉試算表上的這筆。
+ * 同一筆紀錄可能同時有 add 和排在後面的 delete（登記完馬上刪），所以要用「動作＋LogID」才分得出是哪一項。
+ */
+export type OutboxKind = 'add' | 'delete';
+
+/** 登記或刪除後等著寫進試算表的一項（存在手機裡，App 關掉再開會接著送） */
 export interface OutboxItem {
-  /** id 就是 LogID，重送時沿用同一個，伺服器才擋得掉重複 */
+  /** 2.3 以前存下來的沒有這個欄位，一律是 add */
+  kind?: OutboxKind;
+  /** id 就是 LogID，重送時沿用同一個，伺服器才擋得掉重複。delete 時是要刪的那筆 */
   record: CleanRecord;
   status: SyncState;
   /**

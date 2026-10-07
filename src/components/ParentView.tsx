@@ -28,12 +28,12 @@ interface Props {
     points: number;
     note?: string;
   }) => Promise<{ ok: boolean; taskId?: string; message?: string }>;
-  /** 被試算表拒絕、沒有寫進去的登記 */
+  /** 被試算表拒絕的登記（沒寫進去）與刪除（沒刪掉） */
   failedItems: OutboxItem[];
   /** 連續好幾輪都送不出去、還在自動重試的筆數 */
   stuckCount: number;
-  onRetryFailed: (id: string) => void;
-  onDiscardFailed: (id: string) => void;
+  onRetryFailed: (item: OutboxItem) => void;
+  onDiscardFailed: (item: OutboxItem) => void;
 }
 
 // 日期一律以台北時間解讀，與試算表、後端的「本週」一致（見 sheetData 的台北時間段落）
@@ -270,47 +270,36 @@ export const ParentView: React.FC<Props> = ({
     : !!selectedPresetTask?.category.includes('兌換');
   const insufficientPoints = isRedeem && newBalance < 0;
 
+  const failedAdds = failedItems.filter((i) => (i.kind ?? 'add') === 'add');
+  const failedDeletes = failedItems.filter((i) => i.kind === 'delete');
+
   return (
     <div className="space-y-4 pb-24 animate-in fade-in duration-200">
       {/* 被試算表拒絕的登記：不計分，一直留著直到家長處理，不能自己消失 */}
-      {failedItems.length > 0 && (
-        <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2.5">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-            <p className="font-bold text-rose-800">
-              有 {failedItems.length} 筆沒有寫進試算表，不計分
-            </p>
-          </div>
-          {failedItems.map((item) => (
-            <div key={item.record.id} className="p-2.5 rounded-xl bg-white border border-rose-100">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-slate-800 min-w-0 truncate">
-                  {item.record.userName}｜{item.record.taskName}
-                </span>
-                <span className="font-mono font-bold text-rose-600 shrink-0 line-through">
-                  {item.record.points > 0 ? `+${item.record.points}` : item.record.points} 點
-                </span>
-              </div>
-              <p className="mt-1 text-rose-700">原因：{item.message || '試算表拒絕這筆登記'}</p>
-              <div className="mt-2 flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => onRetryFailed(item.record.id)}
-                  className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 active:scale-98 transition"
-                >
-                  再送一次
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onDiscardFailed(item.record.id)}
-                  className="flex-1 py-1.5 rounded-lg bg-white border border-rose-300 text-rose-800 font-medium hover:bg-rose-50 transition"
-                >
-                  不要這筆
-                </button>
-              </div>
-            </div>
-          ))}
-        </div>
+      {failedAdds.length > 0 && (
+        <FailedBox
+          title={`有 ${failedAdds.length} 筆沒有寫進試算表，不計分`}
+          items={failedAdds}
+          fallbackReason="試算表拒絕這筆登記"
+          retryLabel="再送一次"
+          discardLabel="不要這筆"
+          strikePoints
+          onRetry={onRetryFailed}
+          onDiscard={onDiscardFailed}
+        />
+      )}
+
+      {/* 被試算表拒絕的刪除：那筆還在、照常計分，也是留著直到家長處理 */}
+      {failedDeletes.length > 0 && (
+        <FailedBox
+          title={`有 ${failedDeletes.length} 筆刪除沒成功，仍然計分`}
+          items={failedDeletes}
+          fallbackReason="試算表拒絕刪除"
+          retryLabel="再刪一次"
+          discardLabel="不刪了"
+          onRetry={onRetryFailed}
+          onDiscard={onDiscardFailed}
+        />
       )}
 
       {/* 連續好幾輪都送不出去（多半是沒網路）。分數已經算進畫面，只是試算表還沒有 */}
@@ -694,3 +683,52 @@ export const ParentView: React.FC<Props> = ({
     </div>
   );
 };
+
+/** 被試算表拒絕、要家長決定怎麼處理的那幾項（登記與刪除共用） */
+const FailedBox: React.FC<{
+  title: string;
+  items: OutboxItem[];
+  fallbackReason: string;
+  retryLabel: string;
+  discardLabel: string;
+  /** 登記沒寫進去 = 不計分，分數劃掉；刪除沒成功的照常計分，不劃 */
+  strikePoints?: boolean;
+  onRetry: (item: OutboxItem) => void;
+  onDiscard: (item: OutboxItem) => void;
+}> = ({ title, items, fallbackReason, retryLabel, discardLabel, strikePoints = false, onRetry, onDiscard }) => (
+  <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2.5">
+    <div className="flex items-center gap-2">
+      <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+      <p className="font-bold text-rose-800">{title}</p>
+    </div>
+    {items.map((item) => (
+      <div key={item.record.id} className="p-2.5 rounded-xl bg-white border border-rose-100">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-semibold text-slate-800 min-w-0 truncate">
+            {item.record.userName}｜{item.record.taskName}
+          </span>
+          <span className={`font-mono font-bold text-rose-600 shrink-0 ${strikePoints ? 'line-through' : ''}`}>
+            {item.record.points > 0 ? `+${item.record.points}` : item.record.points} 點
+          </span>
+        </div>
+        <p className="mt-1 text-rose-700">原因：{item.message || fallbackReason}</p>
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => onRetry(item)}
+            className="flex-1 py-1.5 rounded-lg bg-rose-600 text-white font-bold hover:bg-rose-700 active:scale-98 transition"
+          >
+            {retryLabel}
+          </button>
+          <button
+            type="button"
+            onClick={() => onDiscard(item)}
+            className="flex-1 py-1.5 rounded-lg bg-white border border-rose-300 text-rose-800 font-medium hover:bg-rose-50 transition"
+          >
+            {discardLabel}
+          </button>
+        </div>
+      </div>
+    ))}
+  </div>
+);

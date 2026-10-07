@@ -10,6 +10,7 @@ import {
   taipeiParts,
 } from '../utils/sheetData';
 import { SyncMark } from './SyncMark';
+import { DeleteRecordDialog } from './DeleteRecordDialog';
 import {
   Sparkles, 
   Smartphone, 
@@ -33,6 +34,8 @@ interface Props {
   onSelectUser: (userId: string) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
+  /** 只有家長解鎖時才會傳入：點紀錄會跳出刪除確認 */
+  onDeleteRecord?: (record: CleanRecord) => void;
 }
 
 export const KidView: React.FC<Props> = ({
@@ -43,8 +46,16 @@ export const KidView: React.FC<Props> = ({
   onSelectUser,
   onRefresh,
   isRefreshing,
+  onDeleteRecord,
 }) => {
   const [filterType, setFilterType] = useState<'all' | 'plus' | 'minus'>('all');
+
+  // 家長點了要刪的那筆。上鎖（含自動上鎖）時一併關掉，否則再解鎖時確認框會自己跳回來
+  const [confirmingDelete, setConfirmingDelete] = useState<CleanRecord | null>(null);
+  const canDelete = !!onDeleteRecord;
+  useEffect(() => {
+    if (!canDelete) setConfirmingDelete(null);
+  }, [canDelete]);
 
   // Filter only children (exclude ADM/家長)
   const kidsList = users.filter((u) => !u.isAdmin && u.id.toUpperCase() !== 'ADM' && u.name !== '家長');
@@ -389,6 +400,10 @@ export const KidView: React.FC<Props> = ({
           </p>
         )}
 
+        {canDelete && childRecords.length > 0 && (
+          <p className="mt-3 text-[11px] text-slate-400">點一下紀錄可以刪除</p>
+        )}
+
         {/* Records List */}
         <div className="mt-4 flex flex-col gap-3">
           {filteredRecords.length === 0 ? (
@@ -455,7 +470,24 @@ export const KidView: React.FC<Props> = ({
                       const formattedTime = formatRecordTime(record.timestamp);
 
                       return (
-                        <div key={record.id} className="py-2.5 flex items-center justify-between gap-3">
+                        <div
+                          key={record.id}
+                          {...(canDelete ? {
+                            role: 'button',
+                            tabIndex: 0,
+                            'aria-label': `刪除 ${record.taskName}`,
+                            onClick: () => setConfirmingDelete(record),
+                            onKeyDown: (e: React.KeyboardEvent) => {
+                              if (e.key === 'Enter' || e.key === ' ') {
+                                e.preventDefault();
+                                setConfirmingDelete(record);
+                              }
+                            },
+                          } : {})}
+                          className={`py-2.5 flex items-center justify-between gap-3 ${
+                            canDelete ? 'cursor-pointer select-none active:bg-slate-200/50 transition-colors' : ''
+                          }`}
+                        >
                           <div className="flex items-center gap-3 min-w-0">
                             <div
                               className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
@@ -535,6 +567,23 @@ export const KidView: React.FC<Props> = ({
           )}
         </div>
       </div>
+
+      {confirmingDelete && onDeleteRecord && (() => {
+        const owner = users.find((u) => u.id === confirmingDelete.userId) ?? currentUser;
+        return (
+          <DeleteRecordDialog
+            record={confirmingDelete}
+            userName={owner.name}
+            currentPoints={owner.currentPoints}
+            isRedeem={resolveCategory(confirmingDelete).includes('兌換')}
+            onConfirm={() => {
+              onDeleteRecord(confirmingDelete);
+              setConfirmingDelete(null);
+            }}
+            onClose={() => setConfirmingDelete(null)}
+          />
+        );
+      })()}
     </div>
   );
 };

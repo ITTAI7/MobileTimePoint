@@ -951,6 +951,70 @@ export async function writeRecordToGoogleSheet(
   }
 }
 
+export interface DeleteRecordResult {
+  /** 伺服器明確回覆已刪除（或早就刪過了） */
+  success: boolean;
+  /** false 代表收不到回覆、不知道刪了沒有。刪除是冪等的，直接重送即可 */
+  confirmed: boolean;
+  /** 刪除後那個孩子的總分；孩子不在使用者表時沒有 */
+  newBalance?: number;
+  code?: string;
+  message?: string;
+}
+
+/**
+ * 刪除存摺裡的一筆（伺服器只在那列標記刪除時間，不真的刪列）。
+ *
+ * 伺服器端是冪等的：已經刪過的再送一次也回成功、不會多扣分，
+ * 所以這裡不必像登記那樣先回讀核對，收不到回覆就交給待送清單重送。
+ */
+export async function deleteRecordInGoogleSheet(logId: string): Promise<DeleteRecordResult> {
+  let responseText: string;
+  try {
+    const response = await fetch(getStoredApiUrl(), {
+      method: 'POST',
+      body: JSON.stringify({ action: 'deleteLog', logId }),
+      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+      redirect: 'follow',
+    });
+    responseText = await response.text();
+  } catch (err: unknown) {
+    return { success: false, confirmed: false, message: err instanceof Error ? err.message : '連線失敗' };
+  }
+
+  try {
+    const json = JSON.parse(responseText);
+    if (json.status === 'success') {
+      // 舊版 Apps Script 不認得 deleteLog，會當成登記處理，又因為 LogID 已存在而回「成功」——
+      // 其實什麼都沒刪。新版一定會帶 deleted: true
+      if (json.deleted !== true) {
+        return {
+          success: false,
+          confirmed: true,
+          code: 'UNSUPPORTED',
+          message: '試算表的程式還沒更新，暫時不能刪除',
+        };
+      }
+      return {
+        success: true,
+        confirmed: true,
+        newBalance: typeof json.newBalance === 'number' ? json.newBalance : undefined,
+      };
+    }
+    if (json.status === 'error') {
+      return {
+        success: false,
+        confirmed: true,
+        code: typeof json.code === 'string' ? json.code : undefined,
+        message: String(json.message || '試算表拒絕刪除'),
+      };
+    }
+  } catch {
+    // 回應不是 JSON（多半是轉址失敗的 HTML）——可能已經刪了，無法判斷
+  }
+  return { success: false, confirmed: false };
+}
+
 /**
  * 把家長密碼寫進試算表（使用者資料與餘額 → ADM 那列）。
  *

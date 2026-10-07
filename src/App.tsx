@@ -1,5 +1,14 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { CleanTask, CleanUser, CleanRecord, SheetAudit, RecalcResult, TrustedDevice, OutboxItem } from './types';
+import {
+  CleanTask,
+  CleanUser,
+  CleanRecord,
+  SheetAudit,
+  RecalcResult,
+  TrustedDevice,
+  OutboxItem,
+  OutboxKind,
+} from './types';
 import {
   fetchSheetData,
   getLocalLogs,
@@ -17,6 +26,7 @@ import {
   saveCachedPasswordHash,
   clearCachedPasswordHash,
   writeRecordToGoogleSheet,
+  deleteRecordInGoogleSheet,
   addNewTaskToGoogleSheet,
   recalculateGoogleSheet,
   registerTrustedDevice,
@@ -32,7 +42,14 @@ import {
   INITIAL_USERS_SEED,
   WriteRecordResult,
 } from './utils/sheetData';
-import { getOutbox, saveOutbox, overlayOutbox, sortNewestFirst } from './utils/outbox';
+import {
+  getOutbox,
+  saveOutbox,
+  overlayOutbox,
+  sortNewestFirst,
+  kindOf,
+  isOutboxItem,
+} from './utils/outbox';
 import { KidView } from './components/KidView';
 import { ParentView } from './components/ParentView';
 import { ParentPasswordModal } from './components/ParentPasswordModal';
@@ -376,11 +393,13 @@ export default function App() {
         : sortedRecords;
       setRecords(shownRecords);
 
-      // 試算表裡已經有的，就不必再等寫入的回應了（回應掉了、或讀取剛好比回應先回來）。
+      // 試算表裡已經有的登記，就不必再等寫入的回應了（回應掉了、或讀取剛好比回應先回來）。
       // 這裡的分數已經含有那筆，不移出清單的話畫面會算兩次。
+      // 只看登記：正在刪的那筆還在試算表上是正常的，移掉就等於取消刪除。
       const onSheet = new Set(sortedRecords.map((r) => r.id));
-      if (outboxRef.current.some((i) => onSheet.has(i.record.id))) {
-        updateOutbox((items) => items.filter((i) => !onSheet.has(i.record.id)));
+      const landed = (i: OutboxItem) => kindOf(i) === 'add' && onSheet.has(i.record.id);
+      if (outboxRef.current.some(landed)) {
+        updateOutbox((items) => items.filter((i) => !landed(i)));
       }
 
       // On successful live sheet sync (especially manual refresh), keep local cache aligned with live sheet
@@ -534,15 +553,79 @@ export default function App() {
     saveLocalLogs(withConfirmed(getLocalLogs()));
 
     // 與上面的 setState 在同一輪合併繪製，畫面不會出現「清單已移除、分數還沒更新」的瞬間
-    updateOutbox((items) => items.filter((i) => i.record.id !== record.id));
+    updateOutbox((items) => items.filter((i) => !isOutboxItem(i, 'add', record.id)));
   };
 
-  /** 送出（或核對）一筆。回傳 'done'，或下一輪要重試的原因 */
-  const sendOutboxItem = async (item: OutboxItem): Promise<'done' | { retry: string }> => {
+  /** 只動待送清單裡「這個動作、這筆紀錄」那一項 —— 同一筆可能同時有登記和排在後面的刪除 */
+  const itemOps = (kind: OutboxKind, id: string) => ({
+    remove: () => updateOutbox((items) => items.filter((i) => !isOutboxItem(i, kind, id))),
+    patch: (patch: Partial<OutboxItem>) =>
+      updateOutbox((items) => items.map((i) => (isOutboxItem(i, kind, id) ? { ...i, ...patch } : i))),
+  });
+
+  /** 刪除確認、但整份重讀失敗時：先在畫面上拿掉這筆，總分改用伺服器回傳的，下次重新整理會校正各列餘額 */
+  const commitDeleted = (record: CleanRecord, newBalance?: number) => {
+    if (newBalance !== undefined) {
+      setUsers((prev) =>
+        prev.map((u) => (u.id === record.userId ? { ...u, currentPoints: newBalance } : u))
+      );
+      const userMap = getLocalUsersOverride();
+      userMap[record.userId] = newBalance;
+      saveLocalUsersOverride(userMap);
+    }
+    const without = (list: CleanRecord[]) => list.filter((r) => r.id !== record.id);
+    setRecords(without);
+    saveLocalLogs(without(getLocalLogs()));
+  };
+
+  /**
+   * 送出一筆刪除。伺服器端是冪等的（刪過的再送一次也回成功、不會多扣分），
+   * 所以收不到回覆時不必像登記那樣先核對，下一輪直接重送。
+   */
+  const sendDeleteItem = async (item: OutboxItem): Promise<'done' | { retry: string }> => {
     const id = item.record.id;
-    const removeItem = () => updateOutbox((items) => items.filter((i) => i.record.id !== id));
-    const patchItem = (patch: Partial<OutboxItem>) =>
-      updateOutbox((items) => items.map((i) => (i.record.id === id ? { ...i, ...patch } : i)));
+    const { patch: patchItem } = itemOps('delete', id);
+
+    patchItem({ attempts: item.attempts + 1 });
+    const result = await deleteRecordInGoogleSheet(id);
+
+    // 找不到：試算表上本來就沒有這筆（登記被拒絕、或有人直接在試算表刪了那列），要的結果已經達成
+    if (result.success || result.code === 'LOG_NOT_FOUND') {
+      // 這筆之後每一列的「餘額」都變了，整份重讀才會跟試算表一致
+      markScreenNewest();
+      if ((await loadData(true)) === null) commitDeleted(item.record, result.newBalance);
+      // 登記被拒絕、接著又被刪掉的那筆，也一起從清單拿掉
+      updateOutbox((items) =>
+        items.filter(
+          (i) => !(i.record.id === id && (kindOf(i) === 'delete' || i.status === 'failed'))
+        )
+      );
+      return 'done';
+    }
+
+    if (result.confirmed) {
+      // 拿不到寫入鎖：伺服器什麼都沒做，稍後再送
+      if (result.code === 'BUSY') return { retry: '試算表正忙，會自動再試' };
+      // 明確拒絕（例如試算表的程式還沒更新）：重試也不會變，交給家長處理。這筆照常顯示、照常計分
+      patchItem({
+        status: 'failed',
+        attempts: 0,
+        retries: 0,
+        message: result.message || '試算表拒絕刪除',
+        code: result.code,
+      });
+      return 'done';
+    }
+
+    return { retry: '收不到試算表的回覆，會自動再試' };
+  };
+
+  /** 送出（或核對）一項。回傳 'done'，或下一輪要重試的原因 */
+  const sendOutboxItem = async (item: OutboxItem): Promise<'done' | { retry: string }> => {
+    if (kindOf(item) === 'delete') return sendDeleteItem(item);
+
+    const id = item.record.id;
+    const { remove: removeItem, patch: patchItem } = itemOps('add', id);
 
     // 送過但沒收到回覆：伺服器可能已經寫入。先回讀試算表核對，確定沒有才重送。
     // （伺服器雖然會用 LogID 擋重複，但「先看再送」不必賭那一層一定有部署。）
@@ -632,7 +715,7 @@ export default function App() {
           const reason = outcome.retry;
           updateOutbox((items) =>
             items.map((i) =>
-              i.record.id === item.record.id
+              isOutboxItem(i, kindOf(item), item.record.id)
                 ? { ...i, retries: (i.retries ?? 0) + 1, message: reason }
                 : i
             )
@@ -693,11 +776,12 @@ export default function App() {
     processOutbox();
   };
 
-  /** 被拒絕的那筆再送一次（沿用同一個 LogID）。伺服器明確拒絕過，確定沒寫入，不必先核對 */
-  const handleRetryFailed = (id: string) => {
+  /** 被拒絕的那項再送一次（沿用同一個 LogID）。伺服器明確拒絕過，確定沒寫入，不必先核對 */
+  const handleRetryFailed = (item: OutboxItem) => {
+    const kind = kindOf(item);
     updateOutbox((items) =>
       items.map((i) =>
-        i.record.id === id && i.status === 'failed'
+        isOutboxItem(i, kind, item.record.id) && i.status === 'failed'
           ? { ...i, status: 'pending', attempts: 0, retries: 0, message: undefined, code: undefined }
           : i
       )
@@ -705,9 +789,44 @@ export default function App() {
     processOutbox();
   };
 
-  /** 放棄被拒絕的那筆。它本來就沒寫進試算表，也沒算進分數，移掉就好 */
-  const handleDiscardFailed = (id: string) => {
-    updateOutbox((items) => items.filter((i) => !(i.record.id === id && i.status === 'failed')));
+  /**
+   * 放棄被拒絕的那項。登記：本來就沒寫進試算表、也沒算進分數，移掉就好。
+   * 刪除：等於不刪了，那筆照常留著計分。
+   */
+  const handleDiscardFailed = (item: OutboxItem) => {
+    const kind = kindOf(item);
+    updateOutbox((items) =>
+      items.filter((i) => !(isOutboxItem(i, kind, item.record.id) && i.status === 'failed'))
+    );
+  };
+
+  /**
+   * 家長在小孩區點紀錄、確認刪除。跟登記一樣：畫面上立刻拿掉，背景再寫進試算表。
+   * 試算表不會真的刪掉那列，只標記刪除時間（見 gas/Code.gs 的「刪除紀錄」）。
+   */
+  const handleDeleteRecord = (record: CleanRecord) => {
+    const id = record.id;
+    const items = outboxRef.current;
+
+    const deleting = items.find((i) => isOutboxItem(i, 'delete', id));
+    if (deleting) {
+      // 上次刪除被拒絕、紀錄又出現了：再刪一次就是重送
+      if (deleting.status === 'failed') handleRetryFailed(deleting);
+      return;
+    }
+
+    // 被拒絕、或還在排隊沒送過的登記：試算表上沒有這筆，從待送清單拿掉就好。
+    // attempts 是 0 就一定還沒送出 —— 送出前會先記下 attempts（見 sendOutboxItem）
+    const add = items.find((i) => isOutboxItem(i, 'add', id));
+    if (add && (add.status === 'failed' || add.attempts === 0)) {
+      updateOutbox((list) => list.filter((i) => !isOutboxItem(i, 'add', id)));
+      return;
+    }
+
+    // 登記可能已經送出、還沒確認：刪除排在它後面，待送清單依序送，不會比登記先到
+    const { syncState: _syncState, syncMessage: _syncMessage, ...clean } = record;
+    updateOutbox((list) => [...list, { kind: 'delete', record: clean, status: 'pending', attempts: 0 }]);
+    processOutbox();
   };
 
   // 新增自訂項目到「任務與配分表」。
@@ -1057,6 +1176,8 @@ export default function App() {
             onSelectUser={setSelectedUserId}
             onRefresh={() => loadData(true)}
             isRefreshing={isRefreshing}
+            // 只有解鎖的家長點紀錄才會跳出刪除確認；小孩點了沒有反應
+            onDeleteRecord={isParentUnlocked ? handleDeleteRecord : undefined}
           />
         ) : (
           <>
